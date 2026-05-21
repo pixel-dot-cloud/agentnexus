@@ -139,9 +139,11 @@ export async function runSubAgent(
           continue;
         }
 
-        const ok = await deps.consent.requestConsent({ toolName: tc.name, args: tc.args });
+        // Sub-agents are non-interactive: allow when no consent is required;
+        // otherwise deny (cannot prompt user from a sub-agent).
+        const ok = !deps.consent.needsConsent(tc.name, tc.args);
         if (!ok) {
-          const msg = `User denied consent for tool: ${tc.name}`;
+          const msg = `Sub-agent cannot request consent for tool: ${tc.name}`;
           emit({ type: 'tool_result', data: { name: tc.name, error: msg } });
           toolResults.push({ id: tc.id, name: tc.name, output: msg, isError: true });
           continue;

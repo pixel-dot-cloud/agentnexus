@@ -156,6 +156,22 @@ export class ConfigManager {
     }
   }
 
+  removeProvider(name: string): boolean {
+    const idx = this.config.providers.findIndex(p => p.name === name);
+    if (idx < 0) return false;
+    this.config.providers.splice(idx, 1);
+    this.config.models = this.config.models.filter(m => m.provider !== name);
+    if (this.config.activeProvider === name) {
+      const next = this.config.providers[0];
+      this.config.activeProvider = next?.name ?? '';
+      const nextModel = next ? this.config.models.find(m => m.provider === next.name) : undefined;
+      this.config.activeModel = nextModel?.id
+        ?? (next && LOCAL_PROVIDER_TYPES.has(next.type) ? AUTO_MODEL : '');
+    }
+    this.save();
+    return true;
+  }
+
   addModel(model: Model): boolean {
     const isAuto  = model.id === AUTO_MODEL;
     const dupId   = this.config.models.find(m =>
@@ -170,5 +186,18 @@ export class ConfigManager {
 
   getEnabledTools(): Tool[] {
     return this.config.tools.filter(t => t.enabled);
+  }
+
+  getProviderByName(name: string): Provider | undefined {
+    return this.config.providers.find(p => p.name === name);
+  }
+
+  setProviderApiKey(name: string, key: string | undefined): boolean {
+    const prov = this.config.providers.find(p => p.name === name);
+    if (!prov) return false;
+    if (key === undefined) delete prov.apiKey;
+    else prov.apiKey = key;
+    this.save();
+    return true;
   }
 }

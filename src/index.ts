@@ -1,5 +1,5 @@
 import * as readline from 'readline';
-import { ConfigManager, CONFIG_DIR } from './config.js';
+import { ConfigManager, CONFIG_DIR, AUTO_MODEL } from './config.js';
 import { startBot } from './telegram/bot.js';
 
 const args = process.argv.slice(2);
@@ -66,15 +66,37 @@ async function runSetup(): Promise<void> {
   }
 
   // Provider setup
-  if (!cfg.activeProvider) {
+  let runProviderFlow = false;
+  if (cfg.providers.length === 0) {
+    runProviderFlow = true;
+  } else {
+    console.log('\n--- Configured providers ---');
+    cfg.providers.forEach((p, i) => {
+      const active = p.name === cfg.activeProvider ? '  <- active' : '';
+      console.log(`${i + 1}. ${p.name} (${p.type})${active}`);
+    });
+    const addAnother = (await ask('Add another provider? [y/N]: ')).trim().toLowerCase();
+    if (addAnother === 'y' || addAnother === 'yes') {
+      runProviderFlow = true;
+    }
+  }
+
+  if (runProviderFlow) {
     console.log('\n--- LLM Provider ---');
     console.log('1. Anthropic (Claude)');
     console.log('2. Ollama (local)');
-    console.log('3. Google AI');
-    console.log('4. OpenAI-compatible (custom)');
+    console.log('3. LM Studio (local)');
+    console.log('4. Google AI');
+    console.log('5. OpenAI-compatible (custom)');
 
-    const provChoice = (await ask('Provider [1-4]: ')).trim();
-    const provMap: Record<string, string> = { '1': 'anthropic', '2': 'ollama', '3': 'google', '4': 'custom' };
+    const provChoice = (await ask('Provider [1-5]: ')).trim();
+    const provMap: Record<string, string> = {
+      '1': 'anthropic',
+      '2': 'ollama',
+      '3': 'lmstudio',
+      '4': 'google',
+      '5': 'custom',
+    };
     const provType = provMap[provChoice];
 
     if (provType) {
@@ -89,8 +111,11 @@ async function runSetup(): Promise<void> {
         modelName = modelId;
       } else if (provType === 'ollama') {
         endpoint  = (await ask('Ollama endpoint [http://localhost:11434]: ')).trim() || 'http://localhost:11434';
-        modelId   = (await ask('Model ID [qwen2.5-coder]: ')).trim() || 'qwen2.5-coder';
-        modelName = modelId;
+        // Local: skip model ID prompt — /models picker auto-discovers from the live endpoint.
+      } else if (provType === 'lmstudio') {
+        endpoint  = (await ask('LM Studio endpoint [http://localhost:1234]: ')).trim() || 'http://localhost:1234';
+        apiKey    = (await ask('LM Studio API key (optional, leave blank for local): ')).trim();
+        // Local: skip model ID prompt — /models picker auto-discovers from the live endpoint.
       } else if (provType === 'google') {
         apiKey    = (await ask('Google AI API key: ')).trim();
         modelId   = (await ask('Model ID [gemini-2.0-flash]: ')).trim() || 'gemini-2.0-flash';
@@ -102,12 +127,16 @@ async function runSetup(): Promise<void> {
         modelName = modelId;
       }
 
+      const provName = `${provType}-${cfg.providers.length + 1}`;
+      const isLocal = provType === 'ollama' || provType === 'lmstudio';
+      config.addProvider({ name: provName, type: provType as any, endpoint: endpoint || undefined, apiKey: apiKey || undefined });
       if (modelId) {
-        const provName = `${provType}-1`;
-        config.addProvider({ name: provName, type: provType as any, endpoint: endpoint || undefined, apiKey: apiKey || undefined });
         config.addModel({ id: modelId, name: modelName, provider: provName });
+      }
+      if (!cfg.activeProvider) {
         config.setActiveProvider(provName);
-        config.setActiveModel(modelId);
+        if (modelId)       config.setActiveModel(modelId);
+        else if (isLocal)  config.setActiveModel(AUTO_MODEL);
       }
     }
   }

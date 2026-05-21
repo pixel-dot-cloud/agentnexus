@@ -13,8 +13,6 @@ export interface ConsentRequest {
   diff?:    string;
 }
 
-export type ConsentPromptFn = (req: ConsentRequest) => Promise<ConsentDecision>;
-
 export type ToolCategory = 'free' | 'edit' | 'exec';
 
 type AllowEntry = { tool: string; scope: string };
@@ -32,6 +30,11 @@ const DESTRUCTIVE_PATTERNS: RegExp[] = [
   /\bgit\s+clean\s+-[a-zA-Z]*[fF]/,
   /\bgit\s+branch\s+-D\b/,
   />\s*\/(?!tmp\/|dev\/null)/,
+  />>\s*\/(etc|usr|boot|root)\b/,
+  /\btee\s+(-[a-zA-Z]*\s+)*\/(etc|usr|boot|root)\b/,
+  /\bfind\b[^|;&]*-delete\b/,
+  /\bxargs\b[^|;&]*\brm\b/,
+  /\bshred\b/,
   /\bcurl\b[^|]*\|\s*(sh|bash|zsh|fish)\b/,
   /\bwget\b[^|]*\|\s*(sh|bash|zsh|fish)\b/,
   /\bnpm\s+(uninstall|unpublish)\b/,
@@ -79,11 +82,9 @@ export class ConsentManager {
   private readonly EDIT  = new Set(['file_write']);
   private readonly EXEC  = new Set(['shell_execute']);
   private getMode: () => PermissionMode;
-  private _promptFn: ConsentPromptFn;
 
-  constructor(promptFn: ConsentPromptFn, getMode: () => PermissionMode = () => 'default') {
-    this._promptFn = promptFn;
-    this.getMode   = getMode;
+  constructor(getMode: () => PermissionMode = () => 'default') {
+    this.getMode = getMode;
   }
 
   private isGated(name: string): boolean {
@@ -119,32 +120,18 @@ export class ConsentManager {
     return !matched;
   }
 
-  async requestConsent(req: ConsentRequest): Promise<boolean> {
-    const mode = this.getMode();
-
-    if (mode === 'plan') {
-      if (this.isGated(req.toolName)) return false;
-    }
-
-    if (mode === 'bypassPermissions') return true;
-    if (mode === 'acceptEdits' && this.EDIT.has(req.toolName)) return true;
-
-    if (!this.needsConsent(req.toolName, req.args)) return true;
-
-    const d = await this._promptFn(req);
-
-    if (d === 'always-tool') {
+  applyDecision(req: ConsentRequest, decision: ConsentDecision): boolean {
+    if (decision === 'always-tool') {
       this.allowed.push({ tool: req.toolName, scope: '*' });
-    } else if (d === 'always-exact' && req.toolName === 'shell_execute') {
+    } else if (decision === 'always-exact' && req.toolName === 'shell_execute') {
       const cmd = extractShellCommand(req.args);
       this.allowed.push({ tool: 'shell_execute', scope: `exact:${normalizeCommand(cmd)}` });
-    } else if (d === 'always-binary' && req.toolName === 'shell_execute') {
+    } else if (decision === 'always-binary' && req.toolName === 'shell_execute') {
       const cmd = extractShellCommand(req.args);
       const bin = firstToken(cmd);
       if (bin) this.allowed.push({ tool: 'shell_execute', scope: `binary:${bin}` });
     }
-
-    return d !== 'deny';
+    return decision !== 'deny';
   }
 
   register(name: string, category: ToolCategory): void {
