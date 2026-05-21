@@ -124,22 +124,25 @@ export async function runAgentLoop(
           } catch {}
         }
 
-        // Plan mode block
+        // Plan-mode hard-block
         if (consentManager.isBlocked(tc.name)) {
           toolResults.push({ id: tc.id, name: tc.name, output: 'Blocked: plan mode', isError: true });
           continue;
         }
 
         // Consent
-        const consentResult = await callbacks.onConsentRequest({ toolName: tc.name, args: tc.args, diff });
-        if (consentResult === false || consentResult === 'deny') {
-          toolResults.push({ id: tc.id, name: tc.name, output: 'denied by user', isError: true });
-          continue;
-        }
-
-        // Apply consent decision to manager
-        if (consentResult !== 'allow-once') {
-          await consentManager.requestConsent({ toolName: tc.name, args: tc.args, diff });
+        const req = { toolName: tc.name, args: tc.args, diff };
+        if (consentManager.needsConsent(tc.name, tc.args)) {
+          const decision = await callbacks.onConsentRequest(req);
+          if (decision === false || decision === 'deny') {
+            toolResults.push({ id: tc.id, name: tc.name, output: 'denied by user', isError: true });
+            continue;
+          }
+          const allowed = consentManager.applyDecision(req, decision);
+          if (!allowed) {
+            toolResults.push({ id: tc.id, name: tc.name, output: 'denied by user', isError: true });
+            continue;
+          }
         }
 
         await callbacks.onToolCall(tc.name, tc.args);

@@ -7,8 +7,9 @@ import { runAgentLoop } from '../lib/agent-loop.js';
 import { ConsentManager } from '../lib/consent.js';
 import { SkillTool } from '../tools/SkillTool.js';
 import { TodoTool, TodoReadTool } from '../tools/TodoTool.js';
+import { AgentSpawnTool } from '../tools/AgentSpawnTool.js';
 import { defaultToolRegistry, ShellExecuteTool } from '../tools.js';
-import { loadSkills } from '../lib/skills.js';
+import { loadSkills, type Skill } from '../lib/skills.js';
 import { loadPrompt } from '../lib/prompts.js';
 import { loadSoulFiles, loadMemoryFiles, loadProjectContext } from '../lib/context.js';
 import { getCwd } from '../lib/cwd.js';
@@ -16,7 +17,8 @@ import { HookManager, loadHooksConfig } from '../lib/hooks-manager.js';
 import { McpClient, McpTool, loadMcpConfig } from '../lib/mcp.js';
 import { saveSession, newId } from '../lib/session.js';
 import { formatForTelegram, formatToolCall, formatToolResult } from './formatter.js';
-import { requestConsentViaTelegram } from './consent.js';
+import { requestConsentViaTelegram, installConsentHandler } from './consent.js';
+import { installModelPickerHandler } from './model-picker.js';
 import { registerCommands } from './commands.js';
 import { dbg, dbgErr } from '../lib/debug.js';
 
@@ -50,17 +52,43 @@ export async function startBot(config: ConfigManager): Promise<void> {
 
   const bot = new Bot(tgCfg.botToken);
 
+  // Hooks (daemon-scoped; shared across chats for sub-agents)
+  const hooks = new HookManager(loadHooksConfig());
+
+  // Daemon-scoped consent manager used by AgentSpawnTool. The per-chat agent
+  // loop builds its own ConsentManager for its onConsentRequest flow; this
+  // one is only reachable through spawned sub-agents.
+  const daemonConsent = new ConsentManager(() => 'default');
+
   // Init tools
   defaultToolRegistry.registerTool(new ShellExecuteTool());
-  defaultToolRegistry.registerTool(new SkillTool(() => []));
+
+  // D3: mutable ref so future hot-reload paths can mutate `skillsRef` without
+  // re-registering. Closure captures the ref, not the initial empty array.
+  let skillsRef: Skill[] = [];
+  defaultToolRegistry.registerTool(new SkillTool(() => skillsRef));
   defaultToolRegistry.registerTool(new TodoTool(() => {}));
   defaultToolRegistry.registerTool(new TodoReadTool());
 
-  // Load skills (update SkillTool after load)
-  const skills = await loadSkills(getCwd()).catch(() => []);
-  if (skills.length) {
-    defaultToolRegistry.registerTool(new SkillTool(() => skills));
-  }
+  // D1: wire AgentSpawnTool. getLLM honors per-call model override.
+  defaultToolRegistry.registerTool(new AgentSpawnTool({
+    getLLM: (modelOverride?: string) => {
+      const provider = config.getActiveProvider();
+      const model    = config.getActiveModel();
+      if (!provider || !model) throw new Error('No model configured for sub-agent');
+      return ProviderFactory.create(provider.type, {
+        endpoint: provider.endpoint,
+        model:    modelOverride ?? model.id,
+        apiKey:   provider.apiKey,
+      });
+    },
+    consent:  daemonConsent,
+    hooks,
+    registry: defaultToolRegistry,
+  }));
+
+  // Load skills into the ref (SkillTool closure already points at it)
+  skillsRef = await loadSkills(getCwd()).catch(() => []);
 
   // Load MCP
   const mcpConf = loadMcpConfig(getCwd());
@@ -80,9 +108,11 @@ export async function startBot(config: ConfigManager): Promise<void> {
     }
   }
 
-  // Hooks
-  const hooks = new HookManager(loadHooksConfig());
   hooks.run('SessionStart');
+
+  // D9: install global consent callback handler once
+  installConsentHandler(bot);
+  installModelPickerHandler(bot, config);
 
   // Register commands
   registerCommands(bot, chats, config);
@@ -92,8 +122,12 @@ export async function startBot(config: ConfigManager): Promise<void> {
     const userId = ctx.from?.id;
     const chatId = ctx.chat.id;
 
-    // Whitelist check
-    if (!tgCfg.allowedUsers.includes(userId ?? -1)) {
+    // D7: defense in depth — empty/missing whitelist denies all
+    if (!Array.isArray(tgCfg.allowedUsers) || tgCfg.allowedUsers.length === 0) {
+      dbg('bot.message.denied.emptyWhitelist', { userId, chatId });
+      return;
+    }
+    if (!userId || !tgCfg.allowedUsers.includes(userId)) {
       dbg('bot.message.denied', { userId, chatId });
       return;
     }
@@ -112,11 +146,16 @@ export async function startBot(config: ConfigManager): Promise<void> {
     const ac = new AbortController();
     state.abortCtrl = ac;
 
+    // D4: keep typing indicator alive across long tool chains
     await ctx.replyWithChatAction('typing').catch(() => {});
+    const typingInterval = setInterval(() => {
+      bot.api.sendChatAction(chatId, 'typing').catch(() => {});
+    }, 4000);
 
     const provider = config.getActiveProvider();
     const model    = config.getActiveModel();
     if (!provider || !model) {
+      clearInterval(typingInterval);
       state.isRunning = false;
       state.abortCtrl = undefined;
       await ctx.reply('No model configured. Edit ~/.agentnexus/config.json').catch(() => {});
@@ -142,13 +181,8 @@ export async function startBot(config: ConfigManager): Promise<void> {
 
     const buildToolSpecs = () => defaultToolRegistry.getToolSpecs();
 
-    const consentManager = new ConsentManager(
-      async (req) => {
-        const result = await requestConsentViaTelegram(bot, chatId, req);
-        return result === false ? 'deny' : result;
-      },
-      () => state.permMode,
-    );
+    // D8: new ConsentManager API — only getMode, no promptFn
+    const consentManager = new ConsentManager(() => state.permMode);
 
     try {
       const result = await runAgentLoop(
@@ -167,8 +201,9 @@ export async function startBot(config: ConfigManager): Promise<void> {
           },
           onStream: () => {},
           onToolCall: async (name, args) => {
+            // D10: formatter returns plain text — no Markdown parse_mode
             const summary = formatToolCall(name, args);
-            await bot.api.sendMessage(chatId, summary, { parse_mode: 'Markdown' }).catch(() => {});
+            await bot.api.sendMessage(chatId, summary).catch(() => {});
           },
           onToolResult: async (name, output, isError) => {
             const summary = formatToolResult(name, output, isError);
@@ -198,21 +233,35 @@ export async function startBot(config: ConfigManager): Promise<void> {
         await ctx.reply(`Error: ${e.message}`).catch(() => {});
       }
     } finally {
+      clearInterval(typingInterval);
       state.isRunning = false;
       state.abortCtrl = undefined;
     }
   });
 
   await bot.api.setMyCommands([
-    { command: 'start',  description: 'Greeting and usage' },
-    { command: 'clear',  description: 'Reset conversation' },
-    { command: 'model',  description: 'List or switch model' },
-    { command: 'mode',   description: 'Change permission mode' },
-    { command: 'status', description: 'Current status' },
-    { command: 'abort',  description: 'Cancel running task' },
-    { command: 'help',   description: 'Show help' },
+    { command: 'start',     description: 'Greeting and usage' },
+    { command: 'clear',     description: 'Reset conversation' },
+    { command: 'model',     description: 'List or switch model' },
+    { command: 'models',    description: 'Interactive model picker' },
+    { command: 'providers', description: 'List providers' },
+    { command: 'provider',  description: 'Switch active provider' },
+    { command: 'apikey',    description: 'Set or clear a provider API key' },
+    { command: 'mode',      description: 'Change permission mode' },
+    { command: 'status',    description: 'Current status' },
+    { command: 'abort',     description: 'Cancel running task' },
+    { command: 'help',      description: 'Show help' },
   ]);
 
   console.log('Nexus online — polling Telegram...');
   bot.start();
+
+  // D5: graceful shutdown
+  const shutdown = async () => {
+    console.log('Shutting down...');
+    try { await bot.stop(); } catch {}
+    process.exit(0);
+  };
+  process.once('SIGINT',  shutdown);
+  process.once('SIGTERM', shutdown);
 }
