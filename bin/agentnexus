@@ -1,0 +1,2 @@
+#!/bin/sh
+exec node --no-deprecation "$(dirname "$(realpath "$0")")/../dist/index.js" "$@"
