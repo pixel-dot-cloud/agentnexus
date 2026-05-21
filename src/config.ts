@@ -24,29 +24,79 @@ export interface Tool {
   enabled: boolean;
 }
 
+export interface BotInstance {
+  name:           string;
+  botToken:       string;
+  allowedUsers:   number[];
+  permissionMode?: PermissionMode;
+}
+
 export interface TelegramConfig {
-  botToken: string;
-  allowedUsers: number[];
-  permissionMode: PermissionMode;
+  bots:     BotInstance[];
+  defaults?: { permissionMode?: PermissionMode };
+}
+
+// Legacy single-bot shape retained only for migration on load.
+interface LegacyTelegramConfig {
+  botToken:        string;
+  allowedUsers:    number[];
+  permissionMode?: PermissionMode;
 }
 
 export interface AgentNexusConfig {
-  activeProvider: string;
-  activeModel:    string;
-  providers:      Provider[];
-  models:         Model[];
-  tools:          Tool[];
-  scrollback?:    number;
-  effortLevel?:   'low' | 'normal' | 'high';
-  telegram?:      TelegramConfig;
+  activeProvider:           string;
+  activeModel:              string;
+  providers:                Provider[];
+  models:                   Model[];
+  tools:                    Tool[];
+  scrollback?:              number;
+  effortLevel?:             'low' | 'normal' | 'high';
+
+  // Toggleable behavior knobs (all optional with sensible defaults).
+  autoUnloadOnModelSwitch?: boolean;
+  consentTimeoutSec?:       number;
+  maxToolIter?:             number;
+  typingIntervalSec?:       number;
+  toolResultTruncChars?:    number;
+
+  telegram?:                TelegramConfig;
 }
+
+export const DEFAULTS = {
+  autoUnloadOnModelSwitch: true,
+  consentTimeoutSec:       300,
+  maxToolIter:             200,
+  typingIntervalSec:       4,
+  toolResultTruncChars:    1500,
+  scrollback:              5000,
+  effortLevel:             'normal' as const,
+  defaultPermissionMode:   'default' as PermissionMode,
+};
 
 const HOME = process.env.HOME || '/home/user';
 export const CONFIG_DIR  = path.join(HOME, '.agentnexus');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 
-const LOCAL_PROVIDER_TYPES = new Set<Provider['type']>(['ollama', 'lmstudio', 'custom']);
+export const LOCAL_PROVIDER_TYPES = new Set<Provider['type']>(['ollama', 'lmstudio', 'custom']);
 export const AUTO_MODEL = '__auto__';
+
+function migrateTelegram(raw: any): TelegramConfig | undefined {
+  if (!raw) return undefined;
+  if (Array.isArray(raw.bots)) return raw as TelegramConfig;
+  const legacy = raw as LegacyTelegramConfig;
+  if (typeof legacy.botToken === 'string' && legacy.botToken) {
+    return {
+      bots: [{
+        name:           'default',
+        botToken:       legacy.botToken,
+        allowedUsers:   Array.isArray(legacy.allowedUsers) ? legacy.allowedUsers : [],
+        permissionMode: legacy.permissionMode ?? 'default',
+      }],
+      defaults: { permissionMode: legacy.permissionMode ?? 'default' },
+    };
+  }
+  return { bots: [] };
+}
 
 export class ConfigManager {
   private config: AgentNexusConfig;
@@ -63,6 +113,7 @@ export class ConfigManager {
         cfg.providers = cfg.providers || [];
         cfg.models    = cfg.models    || [];
         cfg.tools     = cfg.tools     || [];
+        cfg.telegram  = migrateTelegram(cfg.telegram as any);
         if (!cfg.activeProvider && cfg.providers.length) cfg.activeProvider = cfg.providers[0].name;
         if (!cfg.activeModel    && cfg.models.length)    cfg.activeModel    = cfg.models[0].id;
         return cfg;
@@ -87,7 +138,7 @@ export class ConfigManager {
         { name: 'file_write',     description: 'Write files',            enabled: true },
         { name: 'directory_list', description: 'List directory',         enabled: true },
       ],
-      scrollback: 5000,
+      scrollback: DEFAULTS.scrollback,
     };
   }
 
@@ -106,6 +157,7 @@ export class ConfigManager {
 
   getConfig(): AgentNexusConfig { return this.config; }
 
+  // ── Telegram ──────────────────────────────────────────────────────────────
   getTelegramConfig(): TelegramConfig | undefined { return this.config.telegram; }
 
   setTelegramConfig(tg: TelegramConfig): void {
@@ -113,6 +165,73 @@ export class ConfigManager {
     this.save();
   }
 
+  getBots(): BotInstance[] {
+    return this.config.telegram?.bots ?? [];
+  }
+
+  getBot(name: string): BotInstance | undefined {
+    return this.getBots().find(b => b.name === name);
+  }
+
+  addBot(bot: BotInstance): boolean {
+    if (!this.config.telegram) this.config.telegram = { bots: [] };
+    if (this.config.telegram.bots.find(b => b.name === bot.name)) return false;
+    this.config.telegram.bots.push(bot);
+    this.save();
+    return true;
+  }
+
+  removeBot(name: string): boolean {
+    const bots = this.config.telegram?.bots;
+    if (!bots) return false;
+    const idx = bots.findIndex(b => b.name === name);
+    if (idx < 0) return false;
+    bots.splice(idx, 1);
+    this.save();
+    return true;
+  }
+
+  updateBot(name: string, patch: Partial<BotInstance>): boolean {
+    const bot = this.getBot(name);
+    if (!bot) return false;
+    if (patch.name !== undefined)           bot.name           = patch.name;
+    if (patch.botToken !== undefined)       bot.botToken       = patch.botToken;
+    if (patch.allowedUsers !== undefined)   bot.allowedUsers   = patch.allowedUsers;
+    if (patch.permissionMode !== undefined) bot.permissionMode = patch.permissionMode;
+    this.save();
+    return true;
+  }
+
+  addAllowedUser(botName: string, userId: number): boolean {
+    const bot = this.getBot(botName);
+    if (!bot) return false;
+    if (bot.allowedUsers.includes(userId)) return false;
+    bot.allowedUsers.push(userId);
+    this.save();
+    return true;
+  }
+
+  removeAllowedUser(botName: string, userId: number): boolean {
+    const bot = this.getBot(botName);
+    if (!bot) return false;
+    const idx = bot.allowedUsers.indexOf(userId);
+    if (idx < 0) return false;
+    bot.allowedUsers.splice(idx, 1);
+    this.save();
+    return true;
+  }
+
+  setDefaultPermissionMode(mode: PermissionMode): void {
+    if (!this.config.telegram) this.config.telegram = { bots: [] };
+    this.config.telegram.defaults = { ...(this.config.telegram.defaults ?? {}), permissionMode: mode };
+    this.save();
+  }
+
+  getDefaultPermissionMode(): PermissionMode {
+    return this.config.telegram?.defaults?.permissionMode ?? DEFAULTS.defaultPermissionMode;
+  }
+
+  // ── Providers / models ────────────────────────────────────────────────────
   getActiveProvider(): Provider | undefined {
     return this.config.providers.find(p => p.name === this.config.activeProvider);
   }
@@ -172,6 +291,27 @@ export class ConfigManager {
     return true;
   }
 
+  updateProvider(name: string, patch: Partial<Provider>): boolean {
+    const prov = this.config.providers.find(p => p.name === name);
+    if (!prov) return false;
+    const oldName = prov.name;
+    if (patch.name       !== undefined && patch.name !== oldName) {
+      if (this.config.providers.some(p => p.name === patch.name)) return false;
+      prov.name = patch.name;
+      this.config.models.forEach(m => { if (m.provider === oldName) m.provider = patch.name!; });
+      if (this.config.activeProvider === oldName) this.config.activeProvider = patch.name;
+    }
+    if (patch.type       !== undefined) prov.type       = patch.type;
+    if (patch.endpoint   !== undefined) prov.endpoint   = patch.endpoint;
+    if (patch.apiKey     !== undefined) {
+      if (patch.apiKey === '') delete prov.apiKey;
+      else prov.apiKey = patch.apiKey;
+    }
+    if (patch.listModels !== undefined) prov.listModels = patch.listModels;
+    this.save();
+    return true;
+  }
+
   addModel(model: Model): boolean {
     const isAuto  = model.id === AUTO_MODEL;
     const dupId   = this.config.models.find(m =>
@@ -188,6 +328,14 @@ export class ConfigManager {
     return this.config.tools.filter(t => t.enabled);
   }
 
+  toggleTool(name: string): boolean {
+    const t = this.config.tools.find(x => x.name === name);
+    if (!t) return false;
+    t.enabled = !t.enabled;
+    this.save();
+    return true;
+  }
+
   getProviderByName(name: string): Provider | undefined {
     return this.config.providers.find(p => p.name === name);
   }
@@ -199,5 +347,42 @@ export class ConfigManager {
     else prov.apiKey = key;
     this.save();
     return true;
+  }
+
+  // ── Toggleable behavior ───────────────────────────────────────────────────
+  setAutoUnload(b: boolean): void          { this.config.autoUnloadOnModelSwitch = b; this.save(); }
+  getAutoUnload(): boolean                  { return this.config.autoUnloadOnModelSwitch ?? DEFAULTS.autoUnloadOnModelSwitch; }
+
+  setConsentTimeoutSec(n: number): void     { this.config.consentTimeoutSec = n; this.save(); }
+  getConsentTimeoutSec(): number            { return this.config.consentTimeoutSec ?? DEFAULTS.consentTimeoutSec; }
+
+  setMaxToolIter(n: number): void           { this.config.maxToolIter = n; this.save(); }
+  getMaxToolIter(): number                  { return this.config.maxToolIter ?? DEFAULTS.maxToolIter; }
+
+  setTypingIntervalSec(n: number): void     { this.config.typingIntervalSec = n; this.save(); }
+  getTypingIntervalSec(): number            { return this.config.typingIntervalSec ?? DEFAULTS.typingIntervalSec; }
+
+  setToolResultTruncChars(n: number): void  { this.config.toolResultTruncChars = n; this.save(); }
+  getToolResultTruncChars(): number         { return this.config.toolResultTruncChars ?? DEFAULTS.toolResultTruncChars; }
+
+  setScrollback(n: number): void            { this.config.scrollback = n; this.save(); }
+  getScrollback(): number                   { return this.config.scrollback ?? DEFAULTS.scrollback; }
+
+  setEffortLevel(v: 'low' | 'normal' | 'high'): void { this.config.effortLevel = v; this.save(); }
+  getEffortLevel(): 'low' | 'normal' | 'high'        { return this.config.effortLevel ?? DEFAULTS.effortLevel; }
+
+  resetToDefaults(): void {
+    const keepProviders = this.config.providers;
+    const keepTelegram  = this.config.telegram;
+    const keepActiveP   = this.config.activeProvider;
+    const keepActiveM   = this.config.activeModel;
+    const keepModels    = this.config.models;
+    this.config = this.getDefaultConfig();
+    this.config.providers      = keepProviders;
+    this.config.telegram       = keepTelegram;
+    this.config.activeProvider = keepActiveP;
+    this.config.activeModel    = keepActiveM;
+    this.config.models         = keepModels;
+    this.save();
   }
 }
