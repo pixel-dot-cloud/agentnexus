@@ -5,7 +5,7 @@ import { computeDiff, colorDiff } from './diff.js';
 import { dbgErr } from './debug.js';
 import type { TodoItem } from '../tools/TodoTool.js';
 
-const MAX_TOOL_ITER = 200;
+const DEFAULT_MAX_TOOL_ITER = 200;
 const TOOL_BUDGET: Record<string, number> = { todo_write: 20, todo_read: 10 };
 
 export interface AgentLoopCallbacks {
@@ -36,6 +36,7 @@ export async function runAgentLoop(
   consentManager: ConsentManager,
   callbacks: AgentLoopCallbacks,
   signal?: AbortSignal,
+  maxIter: number = DEFAULT_MAX_TOOL_ITER,
 ): Promise<AgentLoopResult> {
   const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
 
@@ -52,7 +53,7 @@ export async function runAgentLoop(
   let iter = 0;
 
   try {
-    for (iter = 0; iter < MAX_TOOL_ITER; iter++) {
+    for (iter = 0; iter < maxIter; iter++) {
       if (signal?.aborted) break;
 
       const tools = buildToolSpecs();

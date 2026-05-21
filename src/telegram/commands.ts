@@ -4,6 +4,7 @@ import type { ChatState } from './bot.js';
 import type { PermissionMode } from '../lib/permission-modes.js';
 import { AUTO_MODEL } from '../config.js';
 import { openModelPicker } from './model-picker.js';
+import { openConfigMenu } from './config-menu.js';
 
 const LOCAL_PROVIDER_TYPES = new Set(['ollama', 'lmstudio', 'custom']);
 
@@ -16,6 +17,7 @@ export function registerCommands(
   bot: Bot,
   chats: Map<number, ChatState>,
   config: ConfigManager,
+  _botName?: string,
 ): void {
 
   bot.command('start', async (ctx) => {
@@ -23,6 +25,7 @@ export function registerCommands(
       'Nexus online.\n\n' +
       'Send me a message and I\'ll execute it.\n\n' +
       'Commands:\n' +
+      '/config — interactive config menu (providers, bots, general)\n' +
       '/clear — reset conversation\n' +
       '/model — switch model by number\n' +
       '/models — interactive model picker\n' +
@@ -40,6 +43,7 @@ export function registerCommands(
     await ctx.reply(
       'Commands:\n\n' +
       '/start — greeting\n' +
+      '/config — interactive config menu (providers, bots, general)\n' +
       '/clear — reset conversation history\n' +
       '/model <number> — switch LLM model by index\n' +
       '/models — interactive picker (configured + live-detected)\n' +
@@ -132,6 +136,10 @@ export function registerCommands(
 
   bot.command('models', async (ctx) => {
     await openModelPicker(bot, ctx.chat.id, config);
+  });
+
+  bot.command('config', async (ctx) => {
+    await openConfigMenu(bot, ctx.chat.id, config);
   });
 
   bot.command('providers', async (ctx) => {

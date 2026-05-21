@@ -1,21 +1,26 @@
 import * as readline from 'readline';
 import { ConfigManager, CONFIG_DIR, AUTO_MODEL } from './config.js';
 import { startBot } from './telegram/bot.js';
+import { runConfigMenu } from './lib/menu-cli.js';
 
 const args = process.argv.slice(2);
 
 if (args.includes('--setup') || args.includes('setup')) {
   await runSetup();
+} else if (args.includes('--config') || args.includes('config')) {
+  const config = new ConfigManager();
+  await runConfigMenu(config);
+  process.exit(0);
 } else {
   await runDaemon();
 }
 
 async function runDaemon(): Promise<void> {
   const config = new ConfigManager();
-  const tgCfg = config.getTelegramConfig();
+  const bots = config.getBots();
 
-  if (!tgCfg?.botToken) {
-    console.error('No Telegram config found. Run: agentnexus --setup');
+  if (!bots.length) {
+    console.error('No Telegram bots configured. Run: agentnexus --setup');
     process.exit(1);
   }
 
@@ -34,9 +39,11 @@ async function runSetup(): Promise<void> {
   const config = new ConfigManager();
   const cfg = config.getConfig();
 
-  // Bot token
-  const existingToken = config.getTelegramConfig()?.botToken || '';
-  const tokenPrompt = existingToken
+  // First bot (setup wizard only configures the default bot; use --config to add more)
+  const existingBots   = config.getBots();
+  const existingFirst  = existingBots[0];
+  const existingToken  = existingFirst?.botToken ?? '';
+  const tokenPrompt    = existingToken
     ? `Telegram bot token [${existingToken.slice(0, 10)}...]: `
     : 'Telegram bot token (from @BotFather): ';
   const botToken = (await ask(tokenPrompt)).trim() || existingToken;
@@ -47,10 +54,9 @@ async function runSetup(): Promise<void> {
     process.exit(1);
   }
 
-  // Allowed users
-  const existingUsers = config.getTelegramConfig()?.allowedUsers || [];
-  const usersStr = existingUsers.length ? existingUsers.join(',') : '';
-  const usersPrompt = existingUsers.length
+  const existingUsers = existingFirst?.allowedUsers ?? [];
+  const usersStr      = existingUsers.length ? existingUsers.join(',') : '';
+  const usersPrompt   = existingUsers.length
     ? `Allowed Telegram user IDs (comma-separated) [${usersStr}]: `
     : 'Your Telegram user ID (get from @userinfobot): ';
   const usersInput = (await ask(usersPrompt)).trim() || usersStr;
@@ -111,11 +117,11 @@ async function runSetup(): Promise<void> {
         modelName = modelId;
       } else if (provType === 'ollama') {
         endpoint  = (await ask('Ollama endpoint [http://localhost:11434]: ')).trim() || 'http://localhost:11434';
-        // Local: skip model ID prompt — /models picker auto-discovers from the live endpoint.
+        // Local: skip model ID — /models auto-discovers.
       } else if (provType === 'lmstudio') {
         endpoint  = (await ask('LM Studio endpoint [http://localhost:1234]: ')).trim() || 'http://localhost:1234';
         apiKey    = (await ask('LM Studio API key (optional, leave blank for local): ')).trim();
-        // Local: skip model ID prompt — /models picker auto-discovers from the live endpoint.
+        // Local: skip model ID — /models auto-discovers.
       } else if (provType === 'google') {
         apiKey    = (await ask('Google AI API key: ')).trim();
         modelId   = (await ask('Model ID [gemini-2.0-flash]: ')).trim() || 'gemini-2.0-flash';
@@ -141,15 +147,25 @@ async function runSetup(): Promise<void> {
     }
   }
 
+  // Write multi-bot shape. Keep any extra bots already configured beyond the first.
+  const existingExtras = existingBots.slice(1);
   config.setTelegramConfig({
-    botToken,
-    allowedUsers,
-    permissionMode: 'default',
+    bots: [
+      {
+        name:           existingFirst?.name ?? 'default',
+        botToken,
+        allowedUsers,
+        permissionMode: existingFirst?.permissionMode ?? 'default',
+      },
+      ...existingExtras,
+    ],
+    defaults: { permissionMode: 'default' },
   });
 
   rl.close();
 
   console.log(`\nConfig saved to ${CONFIG_DIR}/config.json`);
-  console.log('\nRun: agentnexus');
-  console.log('Then message your bot on Telegram!');
+  console.log('\nRun: agentnexus           (start daemon)');
+  console.log('     agentnexus --config   (open interactive config menu)');
+  console.log('     agentnexus --setup    (re-run this wizard)');
 }

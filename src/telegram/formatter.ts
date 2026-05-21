@@ -1,7 +1,7 @@
 import stripAnsi from 'strip-ansi';
 
 const TELEGRAM_MAX_LENGTH = 4096;
-const TOOL_RESULT_MAX = 1500;
+const DEFAULT_TOOL_RESULT_MAX = 1500;
 
 export function formatForTelegram(text: string): string[] {
   // C5: collapse 3+ consecutive newlines to 2
@@ -60,10 +60,15 @@ export function formatToolCall(name: string, args: Record<string, unknown>): str
 
 // C3: show first 1500 chars instead of dropping to a char count
 // TODO: for output > 4000 chars, consider sending as a .txt document via bot.api.sendDocument
-export function formatToolResult(name: string, output: string, isError: boolean): string {
+export function formatToolResult(
+  name: string,
+  output: string,
+  isError: boolean,
+  maxChars: number = DEFAULT_TOOL_RESULT_MAX,
+): string {
   const prefix = isError ? '❌' : '✅';
-  if (output.length <= TOOL_RESULT_MAX) {
+  if (output.length <= maxChars) {
     return `${prefix} ${name}:\n${output}`;
   }
-  return `${prefix} ${name}: (${output.length} chars, showing first ${TOOL_RESULT_MAX})\n${output.slice(0, TOOL_RESULT_MAX)}\n... [truncated]`;
+  return `${prefix} ${name}: (${output.length} chars, showing first ${maxChars})\n${output.slice(0, maxChars)}\n... [truncated]`;
 }

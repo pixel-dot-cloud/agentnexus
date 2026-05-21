@@ -1,7 +1,7 @@
 import { Bot, InlineKeyboard } from 'grammy';
 import type { ConsentRequest, ConsentDecision } from '../lib/consent.js';
 
-const CONSENT_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_CONSENT_TIMEOUT_MS = 5 * 60 * 1000;
 
 interface PendingConsent {
   resolve: (d: ConsentDecision | false) => void;
@@ -48,6 +48,7 @@ export async function requestConsentViaTelegram(
   bot: Bot,
   chatId: number,
   req: ConsentRequest,
+  timeoutMs: number = DEFAULT_CONSENT_TIMEOUT_MS,
 ): Promise<ConsentDecision | false> {
   const argsStr = JSON.stringify(req.args, null, 2).slice(0, 300);
   const text = `🔐 Permission request\n\nTool: ${req.toolName}\n\nArgs:\n${argsStr}`;
@@ -68,7 +69,7 @@ export async function requestConsentViaTelegram(
       pending.delete(msg.message_id);
       bot.api.editMessageText(chatId, msg.message_id, '⏱️ Consent timed out — denied.').catch(() => {});
       resolve(false);
-    }, CONSENT_TIMEOUT_MS);
+    }, timeoutMs);
 
     pending.set(msg.message_id, { resolve, toolName: req.toolName, timeout });
   });
