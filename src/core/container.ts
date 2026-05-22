@@ -175,7 +175,16 @@ export async function ensureNetworkExists(networkName: string, dockerPath: strin
   const check = await dockerExec(dockerPath, ['network', 'inspect', networkName], { timeoutMs: 5000 });
   if (check.exitCode === 0) return;
 
-  const create = await dockerExec(dockerPath, ['network', 'create', networkName], { timeoutMs: 10000 });
+  // enable_ip_masquerade=false disables NAT egress so containers can't reach the
+  // public internet. They can still reach the host bridge gateway (cred-proxy
+  // via host.docker.internal --add-host). enable_icc=false prevents lateral
+  // movement between containers on the same network.
+  const createArgs = [
+    'network', 'create', networkName,
+    '--opt', 'com.docker.network.bridge.enable_ip_masquerade=false',
+    '--opt', 'com.docker.network.bridge.enable_icc=false',
+  ];
+  const create = await dockerExec(dockerPath, createArgs, { timeoutMs: 10000 });
   if (create.exitCode !== 0) {
     // Race: another daemon process may have created it between inspect and create
     const recheck = await dockerExec(dockerPath, ['network', 'inspect', networkName], { timeoutMs: 5000 });
