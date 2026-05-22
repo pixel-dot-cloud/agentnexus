@@ -1,4 +1,4 @@
-import { spawn } from 'child_process';
+import { spawn, type ChildProcess } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import type { AgentDefinition } from './agents.js';
@@ -101,7 +101,7 @@ function mergeSpec(agent: AgentDefinition, defaults: ContainerDefaults) {
  * Default work mount: `~/.agentnexus/agents/<name>/work` -> `/work` (rw).
  * Auto-created on first spawn if absent. Only added when caller passes no mounts.
  */
-function defaultMounts(agent: AgentDefinition): { hostPath: string; containerPath: string; readonly?: boolean }[] {
+export function defaultMounts(agent: AgentDefinition): { hostPath: string; containerPath: string; readonly?: boolean }[] {
   const host = path.join(agentDir(agent.name), 'work');
   try { fs.mkdirSync(host, { recursive: true, mode: 0o700 }); } catch {}
   return [{ hostPath: host, containerPath: '/work', readonly: false }];
@@ -162,4 +162,119 @@ export async function spawnSandbox(
 
 export async function teardownSandbox(handle: ContainerHandle): Promise<void> {
   await handle.stop();
+}
+
+// ── P4b: network helpers + runner spawn ───────────────────────────────────────
+
+/**
+ * Ensure the named Docker network exists. Creates it if absent.
+ * Safe to call concurrently — `docker network create` is idempotent-ish
+ * (returns exit 1 if already present, which we ignore).
+ */
+export async function ensureNetworkExists(networkName: string, dockerPath: string): Promise<void> {
+  const check = await dockerExec(dockerPath, ['network', 'inspect', networkName], { timeoutMs: 5000 });
+  if (check.exitCode === 0) return;
+
+  const create = await dockerExec(dockerPath, ['network', 'create', networkName], { timeoutMs: 10000 });
+  if (create.exitCode !== 0) {
+    // Race: another daemon process may have created it between inspect and create
+    const recheck = await dockerExec(dockerPath, ['network', 'inspect', networkName], { timeoutMs: 5000 });
+    if (recheck.exitCode !== 0) {
+      throw new Error(`Failed to create Docker network "${networkName}": ${create.stderr.trim()}`);
+    }
+  }
+}
+
+export interface HostGatewaySpec {
+  /** Value for --add-host flag, e.g. 'host.docker.internal:host-gateway' */
+  addHostArg: string;
+  /** True if we fell back to a hardcoded IP (Docker < 20.10) */
+  usedFallback: boolean;
+}
+
+/**
+ * Determine the --add-host argument to use so containers can reach the host.
+ * Docker 20.10+ supports the `host-gateway` special value. Older versions need
+ * the actual bridge gateway IP.
+ */
+export async function resolveHostGatewaySpec(dockerPath: string): Promise<HostGatewaySpec> {
+  // Check Docker server version
+  const ver = await dockerExec(dockerPath, ['version', '--format', '{{.Server.Version}}'], { timeoutMs: 5000 });
+  if (ver.exitCode === 0) {
+    const raw = ver.stdout.trim();
+    const [maj, min] = raw.split('.').map(Number);
+    if (maj > 20 || (maj === 20 && min >= 10)) {
+      return { addHostArg: 'host.docker.internal:host-gateway', usedFallback: false };
+    }
+  }
+
+  // Fallback: read gateway IP from bridge network
+  try {
+    const inspect = await dockerExec(
+      dockerPath,
+      ['network', 'inspect', 'bridge', '--format', '{{range .IPAM.Config}}{{.Gateway}}{{end}}'],
+      { timeoutMs: 5000 },
+    );
+    if (inspect.exitCode === 0 && inspect.stdout.trim()) {
+      const ip = inspect.stdout.trim();
+      process.stderr.write(
+        `[agentnexus] Docker < 20.10: host-gateway unsupported, using bridge IP ${ip}\n`,
+      );
+      return { addHostArg: `host.docker.internal:${ip}`, usedFallback: true };
+    }
+  } catch {}
+
+  // Last resort
+  process.stderr.write('[agentnexus] Could not detect host gateway IP, using 172.17.0.1\n');
+  return { addHostArg: 'host.docker.internal:172.17.0.1', usedFallback: true };
+}
+
+/**
+ * Check whether a runner image with the given tag exists locally.
+ */
+export async function checkRunnerImageExists(image: string, dockerPath: string): Promise<boolean> {
+  const r = await dockerExec(
+    dockerPath,
+    ['image', 'inspect', image, '--format', '{{.Id}}'],
+    { timeoutMs: 5000 },
+  );
+  return r.exitCode === 0;
+}
+
+export interface RunnerProcOptions {
+  image:        string;
+  networkName:  string;
+  addHostArg:   string;
+  proxyBaseUrl: string;
+  agentToken:   string;
+  mounts:       { hostPath: string; containerPath: string; readonly?: boolean }[];
+  cpuLimit?:    string;
+  memoryLimit?: string;
+}
+
+/**
+ * Spawn the runner container with stdio piped (interactive mode).
+ * Returns the ChildProcess — lifecycle managed by the caller (runner-bridge).
+ * Uses argv form — no shell, injection-safe.
+ */
+export function spawnRunnerProc(dockerPath: string, opts: RunnerProcOptions): ChildProcess {
+  const args: string[] = [
+    'run', '--rm', '-i',
+    `--network=${opts.networkName}`,
+    `--add-host=${opts.addHostArg}`,
+    '-e', `PROXY_BASE_URL=${opts.proxyBaseUrl}`,
+    '-e', `AGENT_TOKEN=${opts.agentToken}`,
+  ];
+
+  if (opts.cpuLimit)    args.push(`--cpus=${opts.cpuLimit}`);
+  if (opts.memoryLimit) args.push(`--memory=${opts.memoryLimit}`);
+
+  for (const mt of opts.mounts) {
+    const ro = mt.readonly ? ':ro' : '';
+    args.push('-v', `${mt.hostPath}:${mt.containerPath}${ro}`);
+  }
+
+  args.push(opts.image);
+
+  return spawn(dockerPath, args, { stdio: ['pipe', 'pipe', 'pipe'] });
 }

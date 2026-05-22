@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as crypto from 'crypto';
 import type { ChatMessage } from '../providers.js';
 import type { ChannelAdapter } from '../channels/types.js';
 import type { ConfigManager } from '../config.js';
@@ -16,8 +17,19 @@ import { saveSession, newId } from '../lib/session.js';
 import { dbgErr } from '../lib/debug.js';
 import { loadFromDir, type Skill } from '../lib/skills.js';
 import { setActiveSkills, getActiveSkills } from './skill-context.js';
-import { ensureDockerAvailable, spawnSandbox, teardownSandbox, type ContainerHandle } from './container.js';
+import {
+  ensureDockerAvailable,
+  spawnSandbox, teardownSandbox,
+  ensureNetworkExists, resolveHostGatewaySpec, checkRunnerImageExists,
+  defaultMounts,
+  type ContainerHandle,
+} from './container.js';
 import { buildSandboxedExecutor } from './tool-sandbox.js';
+import {
+  ensureCredProxyStarted,
+  registerAgentToken, revokeAgentToken,
+} from './cred-proxy.js';
+import { runTurnViaRunner, type RunTurnPayload } from './runner-bridge.js';
 
 /**
  * Per-conversation state owned by each adapter (per-platformId / per-threadId).
@@ -158,23 +170,15 @@ export async function runTurn(a: RunTurnArgs): Promise<void> {
     setActiveSkills(merged);
   }
 
-  // Opt-in Docker sandbox (P4a). Default: in-process. Set per-agent in agent.json.
+  // Opt-in Docker sandbox (P4a / P4b). Default: in-process. Set per-agent in agent.json.
   let sandbox: ContainerHandle | null = null;
   let toolExecutor: ToolExecutor | undefined;
   const containerSpec = agent.container;
   const containerDefaults = config.getContainerDefaults();
+
   if (containerSpec?.enabled && containerDefaults.enabled) {
     const mode = containerSpec.mode ?? 'tools-only';
-    if (mode === 'full') {
-      clearInterval(typingInterval);
-      state.isRunning = false;
-      state.abortCtrl = undefined;
-      if (overlay.length) setActiveSkills(baselineSkills);
-      await adapter.deliver(platformId, threadId, {
-        text: "Error: agent.container.mode='full' is planned for P4b — use 'tools-only' for now.",
-      }).catch(() => {});
-      return;
-    }
+
     if (!(await ensureDockerAvailable(containerDefaults.dockerPath))) {
       clearInterval(typingInterval);
       state.isRunning = false;
@@ -185,20 +189,185 @@ export async function runTurn(a: RunTurnArgs): Promise<void> {
       }).catch(() => {});
       return;
     }
-    try {
-      sandbox = await spawnSandbox(agent, containerDefaults);
-    } catch (e: any) {
-      clearInterval(typingInterval);
-      state.isRunning = false;
-      state.abortCtrl = undefined;
-      if (overlay.length) setActiveSkills(baselineSkills);
-      await adapter.deliver(platformId, threadId, {
-        text: `Error: sandbox spawn failed: ${e?.message ?? String(e)}`,
-      }).catch(() => {});
-      return;
+
+    if (mode === 'full') {
+      // ── P4b: full mode — whole agent loop runs in the runner container ──────
+      const credProxy = containerDefaults.credProxy;
+
+      if (!credProxy.enabled) {
+        clearInterval(typingInterval);
+        state.isRunning = false;
+        state.abortCtrl = undefined;
+        if (overlay.length) setActiveSkills(baselineSkills);
+        await adapter.deliver(platformId, threadId, {
+          text: "Error: container.credProxy.enabled is false — cannot use full mode.",
+        }).catch(() => {});
+        return;
+      }
+
+      // Check runner image
+      const runnerImage = containerSpec.image ?? credProxy.runnerImage;
+      const imageExists = await checkRunnerImageExists(runnerImage, containerDefaults.dockerPath);
+      if (!imageExists) {
+        clearInterval(typingInterval);
+        state.isRunning = false;
+        state.abortCtrl = undefined;
+        if (overlay.length) setActiveSkills(baselineSkills);
+        await adapter.deliver(platformId, threadId, {
+          text: `Error: runner image "${runnerImage}" not found. Build it first: bash container/build.sh`,
+        }).catch(() => {});
+        return;
+      }
+
+      // Start cred-proxy (idempotent singleton)
+      let proxyPort: number;
+      try {
+        proxyPort = await ensureCredProxyStarted({
+          port: credProxy.port,
+          getProviders: () => config.getConfig().providers,
+        });
+      } catch (e: any) {
+        clearInterval(typingInterval);
+        state.isRunning = false;
+        state.abortCtrl = undefined;
+        if (overlay.length) setActiveSkills(baselineSkills);
+        await adapter.deliver(platformId, threadId, {
+          text: `Error: failed to start cred-proxy: ${e?.message ?? String(e)}`,
+        }).catch(() => {});
+        return;
+      }
+
+      // Ensure network exists
+      const networkName = credProxy.networkName;
+      try {
+        await ensureNetworkExists(networkName, containerDefaults.dockerPath);
+      } catch (e: any) {
+        clearInterval(typingInterval);
+        state.isRunning = false;
+        state.abortCtrl = undefined;
+        if (overlay.length) setActiveSkills(baselineSkills);
+        await adapter.deliver(platformId, threadId, {
+          text: `Error: failed to ensure Docker network "${networkName}": ${e?.message ?? String(e)}`,
+        }).catch(() => {});
+        return;
+      }
+
+      // Resolve host-gateway
+      const gwSpec = await resolveHostGatewaySpec(containerDefaults.dockerPath);
+
+      // Per-spawn agent token
+      const agentToken = crypto.randomBytes(32).toString('hex');
+      registerAgentToken(agentToken, agent.name);
+
+      // Provider info
+      const proxyBaseUrl = `http://host.docker.internal:${proxyPort}/proxy/${provider.name}`;
+
+      // Tool specs for container (exclude invoke_skill — not supported in full mode)
+      const containerToolSpecs = buildToolSpecs().filter(s => s.name !== 'invoke_skill');
+
+      // Mounts
+      const specMounts = containerSpec.mounts ?? [];
+      const mounts = specMounts.length ? specMounts : defaultMounts(agent);
+
+      // Build consent-checked host tool executor for the bridge
+      const hostToolExec = (name: string, args: unknown) =>
+        defaultToolRegistry.executeTool(name, args as any);
+
+      const bridgePayload: RunTurnPayload = {
+        text,
+        history: state.history,
+        systemPrompt,
+        tools:        containerToolSpecs,
+        proxyBaseUrl,
+        agentToken,
+        modelId:      model.id,
+        providerType: provider.type,
+        maxIter:      config.getMaxToolIter(),
+      };
+
+      try {
+        const result = await runTurnViaRunner({
+          dockerPath:    containerDefaults.dockerPath,
+          runnerImage,
+          networkName,
+          addHostArg:    gwSpec.addHostArg,
+          mounts,
+          cpuLimit:      containerSpec.cpuLimit ?? containerDefaults.defaultCpuLimit,
+          memoryLimit:   containerSpec.memoryLimit ?? containerDefaults.defaultMemoryLimit,
+          payload:       bridgePayload,
+          callbacks: {
+            onText: async (t) => {
+              for (const chunk of formatOutbound(t)) {
+                await adapter.deliver(platformId, threadId, { text: chunk }).catch((e) => dbgErr('runTurn.deliver', e));
+              }
+            },
+            onStream:   () => {},
+            onToolCall: async (name, args) => {
+              const t = a.onToolCallText?.(name, args);
+              if (t) await adapter.deliver(platformId, threadId, { text: t }).catch(() => {});
+            },
+            onToolResult: async (name, output, isError) => {
+              const t = a.onToolResultText?.(name, output, isError);
+              if (t) await adapter.deliver(platformId, threadId, { text: t }).catch(() => {});
+            },
+            onConsentRequest: async (req) => {
+              if (adapter.askConsent) {
+                return adapter.askConsent(platformId, threadId, req, config.getConsentTimeoutSec() * 1000);
+              }
+              return false;
+            },
+            onTodosUpdate: async () => {},
+          },
+          executeHostTool: hostToolExec,
+          consentManager: consent,
+          onConsentRequest: async (req) => {
+            if (adapter.askConsent) {
+              return adapter.askConsent(platformId, threadId, req, config.getConsentTimeoutSec() * 1000);
+            }
+            return false;
+          },
+          signal: ac.signal,
+        });
+
+        state.history = result.history;
+        saveSession({
+          id:        state.sessionId,
+          createdAt: new Date().toISOString(),
+          model:     model.name,
+          provider:  provider.name,
+          history:   state.history,
+        });
+      } catch (e: any) {
+        dbgErr('runTurn.full.threw', e);
+        if (!ac.signal.aborted) {
+          await adapter.deliver(platformId, threadId, { text: `Error: ${e.message}` }).catch(() => {});
+        }
+      } finally {
+        clearInterval(typingInterval);
+        state.isRunning = false;
+        state.abortCtrl = undefined;
+        if (overlay.length) setActiveSkills(baselineSkills);
+        revokeAgentToken(agentToken);
+      }
+      return;  // full mode handled above; skip standard path below
+
+    } else {
+      // ── P4a: tools-only mode ────────────────────────────────────────────────
+      try {
+        sandbox = await spawnSandbox(agent, containerDefaults);
+      } catch (e: any) {
+        clearInterval(typingInterval);
+        state.isRunning = false;
+        state.abortCtrl = undefined;
+        if (overlay.length) setActiveSkills(baselineSkills);
+        await adapter.deliver(platformId, threadId, {
+          text: `Error: sandbox spawn failed: ${e?.message ?? String(e)}`,
+        }).catch(() => {});
+        return;
+      }
+      const baseExec = (name: string, args: any) => defaultToolRegistry.executeTool(name, args);
+      toolExecutor = buildSandboxedExecutor(agent, baseExec, sandbox);
     }
-    const baseExec = (name: string, args: any) => defaultToolRegistry.executeTool(name, args);
-    toolExecutor = buildSandboxedExecutor(agent, baseExec, sandbox);
   }
 
   try {

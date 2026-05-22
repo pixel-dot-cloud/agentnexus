@@ -36,6 +36,18 @@ export interface TelegramConfig {
   defaults?: { permissionMode?: PermissionMode };
 }
 
+/** P4b — credential proxy config (lives under container.credProxy). */
+export interface CredProxyConfig {
+  /** Default true when any agent uses full mode. */
+  enabled?:     boolean;
+  /** Port to listen on. Default 40571. */
+  port?:        number;
+  /** Docker network name for full-mode containers. Default 'agentnexus-internal'. */
+  networkName?: string;
+  /** Runner image tag. Default 'agentnexus-runner:latest'. */
+  runnerImage?: string;
+}
+
 export interface ContainerDefaults {
   /** Master kill-switch. Default true — per-agent flag still required to opt in. */
   enabled?:            boolean;
@@ -46,6 +58,8 @@ export interface ContainerDefaults {
   defaultMemoryLimit?: string;
   /** Docker binary path. Default 'docker'. */
   dockerPath?:         string;
+  /** P4b — cred-proxy settings. */
+  credProxy?:          CredProxyConfig;
 }
 
 // Legacy single-bot shape retained only for migration on load.
@@ -91,6 +105,12 @@ export const DEFAULTS = {
     defaultCpuLimit:    '',
     defaultMemoryLimit: '',
     dockerPath:         'docker',
+    credProxy: {
+      enabled:     true,
+      port:        40571,
+      networkName: 'agentnexus-internal',
+      runnerImage: 'agentnexus-runner:latest',
+    },
   },
 };
 
@@ -393,8 +413,9 @@ export class ConfigManager {
   getEffortLevel(): 'low' | 'normal' | 'high'        { return this.config.effortLevel ?? DEFAULTS.effortLevel; }
 
   // ── Container defaults ────────────────────────────────────────────────────
-  getContainerDefaults(): Required<ContainerDefaults> {
+  getContainerDefaults(): Required<Omit<ContainerDefaults, 'credProxy'>> & { credProxy: Required<CredProxyConfig> } {
     const c = this.config.container ?? {};
+    const cp = c.credProxy ?? {};
     return {
       enabled:            c.enabled            ?? DEFAULTS.container.enabled,
       defaultImage:       c.defaultImage       ?? DEFAULTS.container.defaultImage,
@@ -402,11 +423,30 @@ export class ConfigManager {
       defaultCpuLimit:    c.defaultCpuLimit    ?? DEFAULTS.container.defaultCpuLimit,
       defaultMemoryLimit: c.defaultMemoryLimit ?? DEFAULTS.container.defaultMemoryLimit,
       dockerPath:         c.dockerPath         ?? DEFAULTS.container.dockerPath,
+      credProxy: {
+        enabled:     cp.enabled     ?? DEFAULTS.container.credProxy.enabled,
+        port:        cp.port        ?? DEFAULTS.container.credProxy.port,
+        networkName: cp.networkName ?? DEFAULTS.container.credProxy.networkName,
+        runnerImage: cp.runnerImage ?? DEFAULTS.container.credProxy.runnerImage,
+      },
     };
   }
 
   setContainerDefaults(patch: Partial<ContainerDefaults>): void {
     this.config.container = { ...(this.config.container ?? {}), ...patch };
+    this.save();
+  }
+
+  getCredProxyConfig(): Required<CredProxyConfig> {
+    return this.getContainerDefaults().credProxy;
+  }
+
+  setCredProxyConfig(patch: Partial<CredProxyConfig>): void {
+    const current = this.config.container?.credProxy ?? {};
+    this.config.container = {
+      ...(this.config.container ?? {}),
+      credProxy: { ...current, ...patch },
+    };
     this.save();
   }
 
