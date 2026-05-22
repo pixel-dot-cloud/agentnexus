@@ -93,10 +93,14 @@ export interface RunnerBridgeArgs {
 /**
  * Poll for a Docker --cidfile to appear and contain a non-empty container ID.
  * Calls cb once the ID is available. Cleans up the file afterwards.
- * Times out after 10s (container failed to start or cidfile not written).
+ *
+ * Timeout: 30s. If the file never appears (slow image pull, slow disk, daemon
+ * stall), log a warning to stderr — the container is still spawning but the
+ * sweep loop will never get a chance to register it, so a wedged runner will
+ * not be reaped automatically.
  */
 async function waitForCidFile(cidFile: string, cb: (id: string) => void): Promise<void> {
-  const deadline = Date.now() + 10_000;
+  const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     try {
       const id = fs.readFileSync(cidFile, 'utf-8').trim();
@@ -108,6 +112,9 @@ async function waitForCidFile(cidFile: string, cb: (id: string) => void): Promis
     } catch {}
     await new Promise<void>((r) => setTimeout(r, 50));
   }
+  process.stderr.write(
+    `[runner-bridge] cidfile ${cidFile} never populated within 30s — sweep cannot reap this container if it wedges\n`,
+  );
   try { fs.unlinkSync(cidFile); } catch {}
 }
 
