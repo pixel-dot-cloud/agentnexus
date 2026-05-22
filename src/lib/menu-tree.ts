@@ -606,6 +606,78 @@ function credProxyNode(): ListNode {
   };
 }
 
+// ── Sweep (P4c) ──────────────────────────────────────────────────────────────
+function sweepNode(): ListNode {
+  return {
+    kind:  'list',
+    id:    'sweep',
+    label: 'Sweep (stuck-container detection)',
+    children: ({ config }) => {
+      const sw = config.getSweepConfig();
+      return [
+        {
+          kind:    'toggle',
+          id:      'sw-enabled',
+          label:   `Enabled: [${sw.enabled ? '✓' : ' '}]`,
+          current: () => sw.enabled,
+          apply:   async ({ config }, v: boolean) => {
+            config.setSweepConfig({ enabled: v });
+            return { kind: 'message', text: `Sweep enabled = ${v}. Restart daemon to apply.` };
+          },
+        } satisfies ToggleNode,
+        {
+          kind:    'input',
+          id:      'sw-interval',
+          label:   `Interval (sec): ${sw.intervalSec}`,
+          prompt:  'Sweep interval in seconds (default 60):',
+          initial: () => String(sw.intervalSec),
+          parse:   (s) => {
+            const n = parseInt(s.trim(), 10);
+            if (isNaN(n) || n < 10) return new Error('Enter a number >= 10.');
+            return n;
+          },
+          apply:   async ({ config }, v: number) => {
+            config.setSweepConfig({ intervalSec: v });
+            return { kind: 'message', text: `Sweep interval = ${v}s. Restart daemon to apply.` };
+          },
+        } satisfies InputNode,
+        {
+          kind:    'input',
+          id:      'sw-stale',
+          label:   `Stale threshold (sec): ${sw.staleThresholdSec}`,
+          prompt:  'Stale threshold in seconds (default 120, 4× heartbeat period):',
+          initial: () => String(sw.staleThresholdSec),
+          parse:   (s) => {
+            const n = parseInt(s.trim(), 10);
+            if (isNaN(n) || n < 30) return new Error('Enter a number >= 30.');
+            return n;
+          },
+          apply:   async ({ config }, v: number) => {
+            config.setSweepConfig({ staleThresholdSec: v });
+            return { kind: 'message', text: `Stale threshold = ${v}s. Restart daemon to apply.` };
+          },
+        } satisfies InputNode,
+        {
+          kind:    'input',
+          id:      'sw-grace',
+          label:   `Startup grace (sec): ${sw.startupGraceSec}`,
+          prompt:  'Startup grace period in seconds (default 30):',
+          initial: () => String(sw.startupGraceSec),
+          parse:   (s) => {
+            const n = parseInt(s.trim(), 10);
+            if (isNaN(n) || n < 0) return new Error('Enter a non-negative number.');
+            return n;
+          },
+          apply:   async ({ config }, v: number) => {
+            config.setSweepConfig({ startupGraceSec: v });
+            return { kind: 'message', text: `Startup grace = ${v}s. Restart daemon to apply.` };
+          },
+        } satisfies InputNode,
+      ];
+    },
+  };
+}
+
 function containerRoot(): ListNode {
   return {
     kind:  'list',
@@ -684,6 +756,7 @@ function containerRoot(): ListNode {
           },
         } satisfies InputNode,
         credProxyNode(),
+        sweepNode(),
       ];
     },
   };

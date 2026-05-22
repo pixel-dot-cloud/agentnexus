@@ -36,6 +36,18 @@ export interface TelegramConfig {
   defaults?: { permissionMode?: PermissionMode };
 }
 
+/** P4c — sweep config (lives under container.sweep). */
+export interface SweepConfig {
+  /** Default true. */
+  enabled?:           boolean;
+  /** Sweep tick interval. Default 60. */
+  intervalSec?:       number;
+  /** Heartbeat stale threshold. Default 120 (4× heartbeat period). */
+  staleThresholdSec?: number;
+  /** Skip sweep for containers younger than this. Default 30. */
+  startupGraceSec?:   number;
+}
+
 /** P4b — credential proxy config (lives under container.credProxy). */
 export interface CredProxyConfig {
   /** Default true when any agent uses full mode. */
@@ -60,6 +72,8 @@ export interface ContainerDefaults {
   dockerPath?:         string;
   /** P4b — cred-proxy settings. */
   credProxy?:          CredProxyConfig;
+  /** P4c — sweep settings. */
+  sweep?:              SweepConfig;
 }
 
 // Legacy single-bot shape retained only for migration on load.
@@ -110,6 +124,12 @@ export const DEFAULTS = {
       port:        40571,
       networkName: 'agentnexus-internal',
       runnerImage: 'agentnexus-runner:latest',
+    },
+    sweep: {
+      enabled:           true,
+      intervalSec:       60,
+      staleThresholdSec: 120,
+      startupGraceSec:   30,
     },
   },
 };
@@ -413,7 +433,7 @@ export class ConfigManager {
   getEffortLevel(): 'low' | 'normal' | 'high'        { return this.config.effortLevel ?? DEFAULTS.effortLevel; }
 
   // ── Container defaults ────────────────────────────────────────────────────
-  getContainerDefaults(): Required<Omit<ContainerDefaults, 'credProxy'>> & { credProxy: Required<CredProxyConfig> } {
+  getContainerDefaults(): Required<Omit<ContainerDefaults, 'credProxy' | 'sweep'>> & { credProxy: Required<CredProxyConfig> } {
     const c = this.config.container ?? {};
     const cp = c.credProxy ?? {};
     return {
@@ -446,6 +466,26 @@ export class ConfigManager {
     this.config.container = {
       ...(this.config.container ?? {}),
       credProxy: { ...current, ...patch },
+    };
+    this.save();
+  }
+
+  // ── Sweep config (P4c) ────────────────────────────────────────────────────
+  getSweepConfig(): Required<SweepConfig> {
+    const sw = this.config.container?.sweep ?? {};
+    return {
+      enabled:           sw.enabled           ?? DEFAULTS.container.sweep.enabled,
+      intervalSec:       sw.intervalSec       ?? DEFAULTS.container.sweep.intervalSec,
+      staleThresholdSec: sw.staleThresholdSec ?? DEFAULTS.container.sweep.staleThresholdSec,
+      startupGraceSec:   sw.startupGraceSec   ?? DEFAULTS.container.sweep.startupGraceSec,
+    };
+  }
+
+  setSweepConfig(patch: Partial<SweepConfig>): void {
+    const current = this.config.container?.sweep ?? {};
+    this.config.container = {
+      ...(this.config.container ?? {}),
+      sweep: { ...current, ...patch },
     };
     this.save();
   }

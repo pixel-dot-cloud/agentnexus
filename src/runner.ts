@@ -11,6 +11,7 @@
  */
 
 import * as readline from 'readline';
+import * as fs from 'fs';
 import {
   ProviderFactory,
   AnthropicProvider,
@@ -136,6 +137,18 @@ async function remoteExecuteTool(name: string, args: unknown): Promise<ToolResul
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
+  // Touch /heartbeat at startup so the file exists before sweep first checks.
+  try { fs.utimesSync('/heartbeat', new Date(), new Date()); } catch {}
+
+  // Background heartbeat — update mtime every 30s while a turn is in progress.
+  let hbInterval: ReturnType<typeof setInterval> | null = setInterval(() => {
+    try { const now = new Date(); fs.utimes('/heartbeat', now, now, () => {}); } catch {}
+  }, 30_000);
+
+  const stopHeartbeat = (): void => {
+    if (hbInterval) { clearInterval(hbInterval); hbInterval = null; }
+  };
+
   // Read the initial runTurn message
   const firstLine = await new Promise<string>((resolve, reject) => {
     rl.once('line', resolve);
@@ -184,8 +197,10 @@ async function main(): Promise<void> {
       remoteExecuteTool,
     );
 
+    stopHeartbeat();
     send({ type: 'done', history: result.history, usage: result.usage });
   } catch (e: any) {
+    stopHeartbeat();
     send({ type: 'error', message: e?.message ?? String(e) });
   }
 
