@@ -542,6 +542,89 @@ function generalRoot(): ListNode {
   };
 }
 
+// ── Container defaults ───────────────────────────────────────────────────────
+function containerRoot(): ListNode {
+  return {
+    kind:  'list',
+    id:    'container',
+    label: '4. Container defaults (opt-in per agent)',
+    children: ({ config }) => {
+      const c = config.getContainerDefaults();
+      return [
+        {
+          kind:    'toggle',
+          id:      'cnt-enabled',
+          label:   `Master switch: [${c.enabled ? '✓' : ' '}] (per-agent flag still required)`,
+          current: () => c.enabled,
+          apply:   async ({ config }, v: boolean) => {
+            config.setContainerDefaults({ enabled: v });
+            return { kind: 'message', text: `Container master switch = ${v}.` };
+          },
+        } satisfies ToggleNode,
+        {
+          kind:    'input',
+          id:      'cnt-image',
+          label:   `Default image: ${c.defaultImage}`,
+          prompt:  'Default Docker image (e.g. node:20-slim):',
+          initial: () => c.defaultImage,
+          parse:   (s) => s.trim() || new Error('Image cannot be empty.'),
+          apply:   async ({ config }, v: string) => {
+            config.setContainerDefaults({ defaultImage: v });
+            return { kind: 'message', text: `Default image = ${v}.` };
+          },
+        } satisfies InputNode,
+        {
+          kind:    'choice',
+          id:      'cnt-network',
+          label:   `Default network: ${c.defaultNetwork}`,
+          options: [{ value: 'none', label: 'none (isolated)' }, { value: 'bridge', label: 'bridge (internet)' }],
+          current: () => c.defaultNetwork,
+          apply:   async ({ config }, v: string) => {
+            config.setContainerDefaults({ defaultNetwork: v as 'none' | 'bridge' });
+            return { kind: 'message', text: `Default network = ${v}.` };
+          },
+        } satisfies ChoiceNode,
+        {
+          kind:    'input',
+          id:      'cnt-cpu',
+          label:   `Default CPU limit: ${c.defaultCpuLimit || '(unset)'}`,
+          prompt:  'CPU limit (e.g. 0.5, empty to clear):',
+          initial: () => c.defaultCpuLimit,
+          parse:   (s) => s.trim(),
+          apply:   async ({ config }, v: string) => {
+            config.setContainerDefaults({ defaultCpuLimit: v });
+            return { kind: 'message', text: `CPU limit = ${v || '(unset)'}.` };
+          },
+        } satisfies InputNode,
+        {
+          kind:    'input',
+          id:      'cnt-mem',
+          label:   `Default memory limit: ${c.defaultMemoryLimit || '(unset)'}`,
+          prompt:  'Memory limit (e.g. 512m, empty to clear):',
+          initial: () => c.defaultMemoryLimit,
+          parse:   (s) => s.trim(),
+          apply:   async ({ config }, v: string) => {
+            config.setContainerDefaults({ defaultMemoryLimit: v });
+            return { kind: 'message', text: `Memory limit = ${v || '(unset)'}.` };
+          },
+        } satisfies InputNode,
+        {
+          kind:    'input',
+          id:      'cnt-docker',
+          label:   `Docker binary: ${c.dockerPath}`,
+          prompt:  'Docker binary path (default "docker"):',
+          initial: () => c.dockerPath,
+          parse:   (s) => s.trim() || new Error('Path cannot be empty.'),
+          apply:   async ({ config }, v: string) => {
+            config.setContainerDefaults({ dockerPath: v });
+            return { kind: 'message', text: `Docker path = ${v}.` };
+          },
+        } satisfies InputNode,
+      ];
+    },
+  };
+}
+
 // ── Root ─────────────────────────────────────────────────────────────────────
 export function buildRoot(_config: ConfigManager): ListNode {
   return {
@@ -552,6 +635,7 @@ export function buildRoot(_config: ConfigManager): ListNode {
       providersRoot(),
       telegramRoot(),
       generalRoot(),
+      containerRoot(),
     ],
   };
 }

@@ -320,9 +320,9 @@ async function handleSelection(
 }
 
 export function installModelPickerHandler(bot: Bot, config: ConfigManager): void {
-  bot.on('callback_query:data', async (ctx) => {
+  bot.on('callback_query:data', async (ctx, next) => {
     const data = ctx.callbackQuery.data;
-    if (!data?.startsWith('model:')) return;
+    if (!data?.startsWith('model:')) { await next(); return; }
 
     await ctx.answerCallbackQuery().catch(() => {});
 

@@ -36,6 +36,18 @@ export interface TelegramConfig {
   defaults?: { permissionMode?: PermissionMode };
 }
 
+export interface ContainerDefaults {
+  /** Master kill-switch. Default true — per-agent flag still required to opt in. */
+  enabled?:            boolean;
+  /** Default image for tools-only mode. */
+  defaultImage?:       string;
+  defaultNetwork?:     'none' | 'bridge';
+  defaultCpuLimit?:    string;
+  defaultMemoryLimit?: string;
+  /** Docker binary path. Default 'docker'. */
+  dockerPath?:         string;
+}
+
 // Legacy single-bot shape retained only for migration on load.
 interface LegacyTelegramConfig {
   botToken:        string;
@@ -60,6 +72,7 @@ export interface AgentNexusConfig {
   toolResultTruncChars?:    number;
 
   telegram?:                TelegramConfig;
+  container?:               ContainerDefaults;
 }
 
 export const DEFAULTS = {
@@ -71,6 +84,14 @@ export const DEFAULTS = {
   scrollback:              5000,
   effortLevel:             'normal' as const,
   defaultPermissionMode:   'default' as PermissionMode,
+  container: {
+    enabled:            true,
+    defaultImage:       'node:20-slim',
+    defaultNetwork:     'none' as const,
+    defaultCpuLimit:    '',
+    defaultMemoryLimit: '',
+    dockerPath:         'docker',
+  },
 };
 
 const HOME = process.env.HOME || '/home/user';
@@ -370,6 +391,24 @@ export class ConfigManager {
 
   setEffortLevel(v: 'low' | 'normal' | 'high'): void { this.config.effortLevel = v; this.save(); }
   getEffortLevel(): 'low' | 'normal' | 'high'        { return this.config.effortLevel ?? DEFAULTS.effortLevel; }
+
+  // ── Container defaults ────────────────────────────────────────────────────
+  getContainerDefaults(): Required<ContainerDefaults> {
+    const c = this.config.container ?? {};
+    return {
+      enabled:            c.enabled            ?? DEFAULTS.container.enabled,
+      defaultImage:       c.defaultImage       ?? DEFAULTS.container.defaultImage,
+      defaultNetwork:     c.defaultNetwork     ?? DEFAULTS.container.defaultNetwork,
+      defaultCpuLimit:    c.defaultCpuLimit    ?? DEFAULTS.container.defaultCpuLimit,
+      defaultMemoryLimit: c.defaultMemoryLimit ?? DEFAULTS.container.defaultMemoryLimit,
+      dockerPath:         c.dockerPath         ?? DEFAULTS.container.dockerPath,
+    };
+  }
+
+  setContainerDefaults(patch: Partial<ContainerDefaults>): void {
+    this.config.container = { ...(this.config.container ?? {}), ...patch };
+    this.save();
+  }
 
   resetToDefaults(): void {
     const keepProviders = this.config.providers;

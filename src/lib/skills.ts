@@ -28,7 +28,7 @@ function parseFrontmatter(raw: string): { meta: Record<string, unknown>; body: s
   }
 }
 
-function loadFromDir(dir: string, source: 'user' | 'project'): Skill[] {
+export function loadFromDir(dir: string, source: 'user' | 'project'): Skill[] {
   if (!fs.existsSync(dir)) return [];
   const skills: Skill[] = [];
   for (const file of fs.readdirSync(dir)) {
