@@ -189,9 +189,9 @@ export async function openConfigMenu(bot: Bot, chatId: number, config: ConfigMan
 }
 
 export function installConfigMenuHandler(bot: Bot, config: ConfigManager): void {
-  bot.on('callback_query:data', async (ctx) => {
+  bot.on('callback_query:data', async (ctx, next) => {
     const data = ctx.callbackQuery.data;
-    if (!data || !data.startsWith('cfg:')) return;
+    if (!data || !data.startsWith('cfg:')) { await next(); return; }
     await ctx.answerCallbackQuery().catch(() => {});
 
     const parts = data.split(':');

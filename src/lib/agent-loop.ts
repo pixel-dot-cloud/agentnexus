@@ -1,5 +1,5 @@
 import type { LLMProvider, ChatMessage, ToolSpec, ToolResult as ProviderToolResult } from '../providers.js';
-import { defaultToolRegistry } from '../tools.js';
+import { defaultToolRegistry, type ToolResult } from '../tools.js';
 import { ConsentManager, type ConsentRequest, type ConsentDecision } from './consent.js';
 import { computeDiff, colorDiff } from './diff.js';
 import { dbgErr } from './debug.js';
@@ -27,6 +27,8 @@ export interface AgentLoopResult {
   };
 }
 
+export type ToolExecutor = (name: string, args: any) => Promise<ToolResult>;
+
 export async function runAgentLoop(
   input: string,
   history: ChatMessage[],
@@ -37,7 +39,10 @@ export async function runAgentLoop(
   callbacks: AgentLoopCallbacks,
   signal?: AbortSignal,
   maxIter: number = DEFAULT_MAX_TOOL_ITER,
+  executeTool?: ToolExecutor,
 ): Promise<AgentLoopResult> {
+  const runTool: ToolExecutor = executeTool
+    ?? ((name, args) => defaultToolRegistry.executeTool(name, args));
   const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
 
   let currentHistory: ChatMessage[] = [
@@ -149,7 +154,7 @@ export async function runAgentLoop(
         await callbacks.onToolCall(tc.name, tc.args);
 
         try {
-          const r      = await defaultToolRegistry.executeTool(tc.name, tc.args);
+          const r      = await runTool(tc.name, tc.args);
           const output = r.success ? r.output : `Error: ${r.error}`;
           toolResults.push({ id: tc.id, name: tc.name, output, isError: !r.success });
           await callbacks.onToolResult(tc.name, output, !r.success);

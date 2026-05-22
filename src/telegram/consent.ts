@@ -12,8 +12,8 @@ interface PendingConsent {
 const pending = new Map<number, PendingConsent>();
 
 export function installConsentHandler(bot: Bot): void {
-  bot.on('callback_query:data', async (ctx) => {
-    if (!ctx.callbackQuery.data?.startsWith('consent:')) return;
+  bot.on('callback_query:data', async (ctx, next) => {
+    if (!ctx.callbackQuery.data?.startsWith('consent:')) { await next(); return; }
 
     const messageId = ctx.callbackQuery.message?.message_id;
     if (messageId === undefined) {

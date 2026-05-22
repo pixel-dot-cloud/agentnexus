@@ -1,6 +1,6 @@
 import { Bot } from 'grammy';
 import type { ConfigManager } from '../config.js';
-import type { ChatState } from './bot.js';
+import type { ChatState } from '../core/run-turn.js';
 import type { PermissionMode } from '../lib/permission-modes.js';
 import { AUTO_MODEL } from '../config.js';
 import { openModelPicker } from './model-picker.js';

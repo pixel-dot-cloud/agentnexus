@@ -1,7 +1,15 @@
 import * as readline from 'readline';
 import { ConfigManager, CONFIG_DIR, AUTO_MODEL } from './config.js';
-import { startBot } from './telegram/bot.js';
 import { runConfigMenu } from './lib/menu-cli.js';
+import { setupDaemon } from './core/daemon-setup.js';
+import { registerAdapter, startAdapters, stopAdapters, listStarted } from './channels/registry.js';
+import { createTelegramAdapter } from './channels/telegram.js';
+import { createCliAdapter } from './channels/cli.js';
+import { resolveAgent } from './core/agents.js';
+import { runTurn } from './core/run-turn.js';
+import { resolveWiring, fallbackWiring } from './core/wiring.js';
+import { startScheduler, stopScheduler } from './core/scheduler.js';
+import type { ChannelAdapter, InboundContext, InboundMessage } from './channels/types.js';
 
 const args = process.argv.slice(2);
 
@@ -12,20 +20,98 @@ if (args.includes('--setup') || args.includes('setup')) {
   await runConfigMenu(config);
   process.exit(0);
 } else {
-  await runDaemon();
+  await runDaemon(args);
 }
 
-async function runDaemon(): Promise<void> {
-  const config = new ConfigManager();
-  const bots = config.getBots();
+function defaultIdentity(text: string): string[] {
+  const t = (text ?? '').trim();
+  return t ? [t] : [];
+}
 
-  if (!bots.length) {
-    console.error('No Telegram bots configured. Run: agentnexus --setup');
+async function runDaemon(cliArgs: string[]): Promise<void> {
+  const config = new ConfigManager();
+
+  const enableTelegram = !cliArgs.includes('--no-telegram') && !cliArgs.includes('--cli-only');
+  const enableCli      =  cliArgs.includes('--cli') || cliArgs.includes('--cli-only');
+  const enableCron     = !cliArgs.includes('--no-cron');
+
+  const bots = enableTelegram ? config.getBots() : [];
+  if (enableTelegram && !bots.length && !enableCli) {
+    console.error('No Telegram bots configured. Run: agentnexus --setup or --cli to use the terminal channel.');
     process.exit(1);
   }
 
   console.log('Starting AgentNexus daemon...');
-  await startBot(config);
+
+  // Daemon-scoped wiring (tools, MCP, skills, hooks).
+  await setupDaemon(config);
+
+  // Register channel adapters.
+  if (enableTelegram) {
+    for (const inst of bots) {
+      if (!inst.botToken) {
+        console.error(`Skipping bot "${inst.name}": no botToken set.`);
+        continue;
+      }
+      registerAdapter(createTelegramAdapter(inst, config));
+    }
+  }
+  if (enableCli) {
+    registerAdapter(createCliAdapter(config));
+  }
+
+  // Adapter-agnostic inbound handler.
+  const callbacks = {
+    async onInbound(ctx: InboundContext, msg: InboundMessage): Promise<void> {
+      const adapter: ChannelAdapter | undefined =
+        listStarted().find(a => a.name === `${ctx.channelType}:${ctx.adapterId}`)
+        ?? listStarted().find(a => a.channelType === ctx.channelType);
+      if (!adapter) {
+        console.error(`No adapter for channel "${ctx.channelType}"`);
+        return;
+      }
+
+      const wiring = resolveWiring(ctx.channelType, ctx.platformId, ctx.threadId)
+                  ?? fallbackWiring(ctx.channelType, ctx.platformId);
+      const agent  = resolveAgent(wiring.agentName);
+      const state  = adapter.getOrCreateState(ctx.platformId, ctx.threadId);
+
+      await runTurn({
+        text:            msg.text,
+        state,
+        agent,
+        config,
+        adapter,
+        platformId:      ctx.platformId,
+        threadId:        ctx.threadId,
+        formatOutbound:  adapter.formatOutbound   ?? defaultIdentity,
+        onToolCallText:  adapter.formatToolCall   ?? (() => null),
+        onToolResultText: adapter.formatToolResult ?? (() => null),
+      });
+    },
+  };
+
+  await startAdapters(callbacks);
+
+  const started = listStarted();
+  if (!started.length) {
+    console.error('No channel adapters could start.');
+    process.exit(1);
+  }
+  console.log(`Nexus online — ${started.length} channel(s): ${started.map(a => a.name).join(', ')}`);
+
+  if (enableCron) {
+    startScheduler(config, callbacks);
+  }
+
+  const shutdown = async () => {
+    console.log('Shutting down...');
+    stopScheduler();
+    await stopAdapters();
+    process.exit(0);
+  };
+  process.once('SIGINT',  shutdown);
+  process.once('SIGTERM', shutdown);
 }
 
 async function runSetup(): Promise<void> {
@@ -39,7 +125,6 @@ async function runSetup(): Promise<void> {
   const config = new ConfigManager();
   const cfg = config.getConfig();
 
-  // First bot (setup wizard only configures the default bot; use --config to add more)
   const existingBots   = config.getBots();
   const existingFirst  = existingBots[0];
   const existingToken  = existingFirst?.botToken ?? '';
@@ -71,7 +156,6 @@ async function runSetup(): Promise<void> {
     process.exit(1);
   }
 
-  // Provider setup
   let runProviderFlow = false;
   if (cfg.providers.length === 0) {
     runProviderFlow = true;
@@ -89,7 +173,7 @@ async function runSetup(): Promise<void> {
 
   if (runProviderFlow) {
     console.log('\n--- LLM Provider ---');
-    console.log('1. Anthropic (Claude)');
+    console.log('1. Anthropic');
     console.log('2. Ollama (local)');
     console.log('3. LM Studio (local)');
     console.log('4. Google AI');
@@ -117,11 +201,9 @@ async function runSetup(): Promise<void> {
         modelName = modelId;
       } else if (provType === 'ollama') {
         endpoint  = (await ask('Ollama endpoint [http://localhost:11434]: ')).trim() || 'http://localhost:11434';
-        // Local: skip model ID — /models auto-discovers.
       } else if (provType === 'lmstudio') {
         endpoint  = (await ask('LM Studio endpoint [http://localhost:1234]: ')).trim() || 'http://localhost:1234';
         apiKey    = (await ask('LM Studio API key (optional, leave blank for local): ')).trim();
-        // Local: skip model ID — /models auto-discovers.
       } else if (provType === 'google') {
         apiKey    = (await ask('Google AI API key: ')).trim();
         modelId   = (await ask('Model ID [gemini-2.0-flash]: ')).trim() || 'gemini-2.0-flash';
@@ -147,7 +229,6 @@ async function runSetup(): Promise<void> {
     }
   }
 
-  // Write multi-bot shape. Keep any extra bots already configured beyond the first.
   const existingExtras = existingBots.slice(1);
   config.setTelegramConfig({
     bots: [
@@ -165,7 +246,8 @@ async function runSetup(): Promise<void> {
   rl.close();
 
   console.log(`\nConfig saved to ${CONFIG_DIR}/config.json`);
-  console.log('\nRun: agentnexus           (start daemon)');
+  console.log('\nRun: agentnexus           (start daemon — Telegram)');
+  console.log('     agentnexus --cli      (terminal channel)');
   console.log('     agentnexus --config   (open interactive config menu)');
   console.log('     agentnexus --setup    (re-run this wizard)');
 }
