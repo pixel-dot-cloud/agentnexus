@@ -250,6 +250,8 @@ export interface RunnerProcOptions {
   mounts:       { hostPath: string; containerPath: string; readonly?: boolean }[];
   cpuLimit?:    string;
   memoryLimit?: string;
+  /** Path to a file where Docker writes the container ID on start. Caller reads and cleans up. */
+  cidFile?:     string;
 }
 
 /**
@@ -268,6 +270,7 @@ export function spawnRunnerProc(dockerPath: string, opts: RunnerProcOptions): Ch
 
   if (opts.cpuLimit)    args.push(`--cpus=${opts.cpuLimit}`);
   if (opts.memoryLimit) args.push(`--memory=${opts.memoryLimit}`);
+  if (opts.cidFile)     args.push(`--cidfile=${opts.cidFile}`);
 
   for (const mt of opts.mounts) {
     const ro = mt.readonly ? ':ro' : '';

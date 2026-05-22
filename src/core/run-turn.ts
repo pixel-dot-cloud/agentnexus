@@ -30,6 +30,7 @@ import {
   registerAgentToken, revokeAgentToken,
 } from './cred-proxy.js';
 import { runTurnViaRunner, type RunTurnPayload } from './runner-bridge.js';
+import { sweeper } from './sweep.js';
 
 /**
  * Per-conversation state owned by each adapter (per-platformId / per-threadId).
@@ -285,6 +286,8 @@ export async function runTurn(a: RunTurnArgs): Promise<void> {
         maxIter:      config.getMaxToolIter(),
       };
 
+      let sweptContainerId: string | null = null;
+
       try {
         const result = await runTurnViaRunner({
           dockerPath:    containerDefaults.dockerPath,
@@ -295,6 +298,20 @@ export async function runTurn(a: RunTurnArgs): Promise<void> {
           cpuLimit:      containerSpec.cpuLimit ?? containerDefaults.defaultCpuLimit,
           memoryLimit:   containerSpec.memoryLimit ?? containerDefaults.defaultMemoryLimit,
           payload:       bridgePayload,
+          onContainerSpawned: (id) => {
+            sweptContainerId = id;
+            sweeper.register({
+              containerId: id,
+              agentName:   agent.name,
+              startedAt:   Date.now(),
+              onStuck: async (reason) => {
+                await adapter.deliver(platformId, threadId, {
+                  text: `Agent turn killed: ${reason}`,
+                }).catch(() => {});
+                ac.abort();
+              },
+            });
+          },
           callbacks: {
             onText: async (t) => {
               for (const chunk of formatOutbound(t)) {
@@ -348,6 +365,7 @@ export async function runTurn(a: RunTurnArgs): Promise<void> {
         state.abortCtrl = undefined;
         if (overlay.length) setActiveSkills(baselineSkills);
         revokeAgentToken(agentToken);
+        if (sweptContainerId) sweeper.unregister(sweptContainerId);
       }
       return;  // full mode handled above; skip standard path below
 

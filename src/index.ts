@@ -9,6 +9,7 @@ import { resolveAgent } from './core/agents.js';
 import { runTurn } from './core/run-turn.js';
 import { resolveWiring, fallbackWiring } from './core/wiring.js';
 import { startScheduler, stopScheduler } from './core/scheduler.js';
+import { sweeper } from './core/sweep.js';
 import type { ChannelAdapter, InboundContext, InboundMessage } from './channels/types.js';
 
 const args = process.argv.slice(2);
@@ -104,8 +105,21 @@ async function runDaemon(cliArgs: string[]): Promise<void> {
     startScheduler(config, callbacks);
   }
 
+  // P4c — start sweep loop for stuck full-mode containers.
+  const swCfg = config.getSweepConfig();
+  sweeper.start(
+    {
+      enabled:          swCfg.enabled,
+      intervalMs:       swCfg.intervalSec       * 1000,
+      staleThresholdMs: swCfg.staleThresholdSec * 1000,
+      startupGraceMs:   swCfg.startupGraceSec   * 1000,
+    },
+    config.getContainerDefaults().dockerPath,
+  );
+
   const shutdown = async () => {
     console.log('Shutting down...');
+    sweeper.stop();
     stopScheduler();
     await stopAdapters();
     process.exit(0);

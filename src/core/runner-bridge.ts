@@ -18,6 +18,10 @@
  */
 
 import type { ChildProcess } from 'child_process';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import * as crypto from 'crypto';
 import type { ChatMessage, ToolSpec } from '../providers.js';
 import type { AgentLoopCallbacks, AgentLoopResult } from '../lib/agent-loop.js';
 import type { ToolResult } from '../tools.js';
@@ -79,6 +83,32 @@ export interface RunnerBridgeArgs {
   onConsentRequest:  (req: ConsentRequest) => Promise<false | import('../lib/consent.js').ConsentDecision>;
 
   signal?: AbortSignal;
+
+  /** Called once the container ID is known (P4c sweep registration). */
+  onContainerSpawned?: (containerId: string) => void;
+}
+
+// ── Cidfile helpers (P4c) ─────────────────────────────────────────────────────
+
+/**
+ * Poll for a Docker --cidfile to appear and contain a non-empty container ID.
+ * Calls cb once the ID is available. Cleans up the file afterwards.
+ * Times out after 10s (container failed to start or cidfile not written).
+ */
+async function waitForCidFile(cidFile: string, cb: (id: string) => void): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    try {
+      const id = fs.readFileSync(cidFile, 'utf-8').trim();
+      if (id) {
+        cb(id);
+        try { fs.unlinkSync(cidFile); } catch {}
+        return;
+      }
+    } catch {}
+    await new Promise<void>((r) => setTimeout(r, 50));
+  }
+  try { fs.unlinkSync(cidFile); } catch {}
 }
 
 // ── Bridge ────────────────────────────────────────────────────────────────────
@@ -92,6 +122,9 @@ export async function runTurnViaRunner(args: RunnerBridgeArgs): Promise<AgentLoo
     signal,
   } = args;
 
+  // P4c: unique cidfile so the sweeper can look up the container ID.
+  const cidFile = path.join(os.tmpdir(), `agentnexus-cid-${crypto.randomBytes(8).toString('hex')}`);
+
   const proc: ChildProcess = spawnRunnerProc(dockerPath, {
     image: runnerImage,
     networkName,
@@ -101,7 +134,16 @@ export async function runTurnViaRunner(args: RunnerBridgeArgs): Promise<AgentLoo
     mounts,
     cpuLimit,
     memoryLimit,
+    cidFile,
   });
+
+  // Start background poll — calls onContainerSpawned once the container ID is known.
+  if (args.onContainerSpawned) {
+    waitForCidFile(cidFile, args.onContainerSpawned).catch(() => {});
+  } else {
+    // Still clean up the cidfile even if nobody is listening.
+    waitForCidFile(cidFile, () => {}).catch(() => {});
+  }
 
   function sendToContainer(msg: H2CMsg): void {
     try { proc.stdin!.write(JSON.stringify(msg) + '\n'); } catch {}
