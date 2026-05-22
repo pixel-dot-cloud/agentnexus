@@ -256,9 +256,9 @@ export async function runTurn(a: RunTurnArgs): Promise<void> {
       // Resolve host-gateway
       const gwSpec = await resolveHostGatewaySpec(containerDefaults.dockerPath);
 
-      // Per-spawn agent token
+      // Per-spawn agent token, bound to {agent, provider} for this turn.
       const agentToken = crypto.randomBytes(32).toString('hex');
-      registerAgentToken(agentToken, agent.name);
+      registerAgentToken(agentToken, agent.name, provider.name);
 
       // Provider info
       const proxyBaseUrl = `http://host.docker.internal:${proxyPort}/proxy/${provider.name}`;
