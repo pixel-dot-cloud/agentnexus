@@ -433,9 +433,13 @@ export class ConfigManager {
   getEffortLevel(): 'low' | 'normal' | 'high'        { return this.config.effortLevel ?? DEFAULTS.effortLevel; }
 
   // ── Container defaults ────────────────────────────────────────────────────
-  getContainerDefaults(): Required<Omit<ContainerDefaults, 'credProxy' | 'sweep'>> & { credProxy: Required<CredProxyConfig> } {
-    const c = this.config.container ?? {};
+  getContainerDefaults(): Required<Omit<ContainerDefaults, 'credProxy' | 'sweep'>> & {
+    credProxy: Required<CredProxyConfig>;
+    sweep:     Required<SweepConfig>;
+  } {
+    const c  = this.config.container ?? {};
     const cp = c.credProxy ?? {};
+    const sw = c.sweep ?? {};
     return {
       enabled:            c.enabled            ?? DEFAULTS.container.enabled,
       defaultImage:       c.defaultImage       ?? DEFAULTS.container.defaultImage,
@@ -448,6 +452,12 @@ export class ConfigManager {
         port:        cp.port        ?? DEFAULTS.container.credProxy.port,
         networkName: cp.networkName ?? DEFAULTS.container.credProxy.networkName,
         runnerImage: cp.runnerImage ?? DEFAULTS.container.credProxy.runnerImage,
+      },
+      sweep: {
+        enabled:           sw.enabled           ?? DEFAULTS.container.sweep.enabled,
+        intervalSec:       sw.intervalSec       ?? DEFAULTS.container.sweep.intervalSec,
+        staleThresholdSec: sw.staleThresholdSec ?? DEFAULTS.container.sweep.staleThresholdSec,
+        startupGraceSec:   sw.startupGraceSec   ?? DEFAULTS.container.sweep.startupGraceSec,
       },
     };
   }
