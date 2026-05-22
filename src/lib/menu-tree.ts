@@ -543,6 +543,69 @@ function generalRoot(): ListNode {
 }
 
 // ── Container defaults ───────────────────────────────────────────────────────
+function credProxyNode(): ListNode {
+  return {
+    kind:  'list',
+    id:    'cred-proxy',
+    label: 'Cred-proxy (full mode)',
+    children: ({ config }) => {
+      const cp = config.getCredProxyConfig();
+      return [
+        {
+          kind:    'toggle',
+          id:      'cp-enabled',
+          label:   `Enabled: [${cp.enabled ? '✓' : ' '}]`,
+          current: () => cp.enabled,
+          apply:   async ({ config }, v: boolean) => {
+            config.setCredProxyConfig({ enabled: v });
+            return { kind: 'message', text: `Cred-proxy enabled = ${v}.` };
+          },
+        } satisfies ToggleNode,
+        {
+          kind:    'input',
+          id:      'cp-port',
+          label:   `Port: ${cp.port}`,
+          prompt:  'Cred-proxy port (default 40571):',
+          initial: () => String(cp.port),
+          parse:   (s) => {
+            const n = parseInt(s.trim(), 10);
+            if (isNaN(n) || n < 1024 || n > 65535) return new Error('Enter a port between 1024 and 65535.');
+            return n;
+          },
+          apply:   async ({ config }, v: number) => {
+            config.setCredProxyConfig({ port: v });
+            return { kind: 'message', text: `Cred-proxy port = ${v}. Restart daemon to apply.` };
+          },
+        } satisfies InputNode,
+        {
+          kind:    'input',
+          id:      'cp-network',
+          label:   `Docker network: ${cp.networkName}`,
+          prompt:  'Docker network for full-mode containers:',
+          initial: () => cp.networkName,
+          parse:   (s) => s.trim() || new Error('Network name cannot be empty.'),
+          apply:   async ({ config }, v: string) => {
+            config.setCredProxyConfig({ networkName: v });
+            return { kind: 'message', text: `Network = ${v}.` };
+          },
+        } satisfies InputNode,
+        {
+          kind:    'input',
+          id:      'cp-image',
+          label:   `Runner image: ${cp.runnerImage}`,
+          prompt:  'Runner image tag (build with container/build.sh):',
+          initial: () => cp.runnerImage,
+          parse:   (s) => s.trim() || new Error('Image tag cannot be empty.'),
+          apply:   async ({ config }, v: string) => {
+            config.setCredProxyConfig({ runnerImage: v });
+            return { kind: 'message', text: `Runner image = ${v}.` };
+          },
+        } satisfies InputNode,
+      ];
+    },
+  };
+}
+
 function containerRoot(): ListNode {
   return {
     kind:  'list',
@@ -620,6 +683,7 @@ function containerRoot(): ListNode {
             return { kind: 'message', text: `Docker path = ${v}.` };
           },
         } satisfies InputNode,
+        credProxyNode(),
       ];
     },
   };

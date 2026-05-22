@@ -706,10 +706,52 @@ export class AnthropicProvider extends LLMProvider {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Google AI
+// Google AI — raw fetch via OAI-compat endpoint (P4b default)
 // ─────────────────────────────────────────────────────────────────────────────
 
-export class GoogleAIProvider extends LLMProvider {
+/**
+ * Google AI via the OAI-compatible Gemini endpoint.
+ * Endpoint default: https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
+ *
+ * Dropped the @google/genai SDK dependency for this provider — the SDK does not
+ * honour arbitrary base URLs, which breaks full-mode container routing via the
+ * cred-proxy. Raw fetch is equivalent and simpler.
+ *
+ * The SDK-based implementation is preserved as GoogleAISDKProvider below for
+ * reference (not wired into ProviderFactory).
+ */
+export class GoogleAIRawFetchProvider extends OpenAICompatibleProvider {
+  private static readonly DEFAULT_ENDPOINT =
+    'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
+
+  constructor(config: ProviderConfig) {
+    super(
+      { ...config, endpoint: config.endpoint ?? GoogleAIRawFetchProvider.DEFAULT_ENDPOINT },
+      'Google AI',
+    );
+  }
+
+  override async resolveModel(signal?: AbortSignal): Promise<string> {
+    if (this.config.model === AUTO_MODEL) {
+      throw new Error(
+        'Google AI does not support auto model selection. Specify a model ID (e.g. gemini-2.0-flash).',
+      );
+    }
+    return this.config.model;
+  }
+
+  override async listModels(_signal?: AbortSignal): Promise<string[]> {
+    // Google AI's OAI-compat /v1/models endpoint requires auth and returns a
+    // non-standard shape. Return empty; users configure the model explicitly.
+    return [];
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Google AI — SDK-based implementation (kept for reference, not in factory)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export class GoogleAISDKProvider extends LLMProvider {
   constructor(config: ProviderConfig) {
     super(config, 'Google AI');
   }
@@ -836,7 +878,7 @@ export class ProviderFactory {
       case 'ollama':       return new OllamaProvider(config);
       case 'lmstudio':     return new LMStudioProvider(config);
       case 'google':
-      case 'google-ai':    return new GoogleAIProvider(config);
+      case 'google-ai':    return new GoogleAIRawFetchProvider(config);
       case 'anthropic':    return new AnthropicProvider(config);
       case 'custom':       return new OpenAICompatibleProvider(config, 'Custom');
       default: throw new Error(`Unknown provider type: ${type}`);
