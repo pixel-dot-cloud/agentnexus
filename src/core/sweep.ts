@@ -28,6 +28,7 @@ export class Sweeper {
   private entries    = new Map<string, SweepEntry>();
   private timer:       NodeJS.Timeout | null = null;
   private dockerPath = 'docker';
+  private running   = false;
 
   start(cfg: SweepConfig, dockerPath = 'docker'): void {
     if (this.timer) return;
@@ -49,27 +50,37 @@ export class Sweeper {
   }
 
   private async tick(cfg: SweepConfig): Promise<void> {
-    const now   = Date.now();
-    const stale: SweepEntry[] = [];
+    // Re-entrancy lock: a slow tick must not overlap with the next interval
+    // firing or the same container would be marked stale twice → double onStuck.
+    if (this.running) return;
+    this.running = true;
+    try {
+      const now   = Date.now();
+      const stale: SweepEntry[] = [];
 
-    for (const entry of this.entries.values()) {
-      if (now - entry.startedAt < cfg.startupGraceMs) continue;
+      for (const entry of this.entries.values()) {
+        if (now - entry.startedAt < cfg.startupGraceMs) continue;
 
-      const hb = await this.checkHeartbeat(entry.containerId);
-      if (hb.failed) {
-        stale.push(entry);
-      } else if (hb.mtime !== undefined) {
-        entry.lastSeenMtime = hb.mtime;
-        if (now / 1000 - hb.mtime > cfg.staleThresholdMs / 1000) {
+        const hb = await this.checkHeartbeat(entry.containerId);
+        if (hb.failed) {
           stale.push(entry);
+        } else if (hb.mtime !== undefined) {
+          entry.lastSeenMtime = hb.mtime;
+          if (now - hb.mtime * 1000 > cfg.staleThresholdMs) {
+            stale.push(entry);
+          }
         }
       }
-    }
 
-    for (const entry of stale) {
-      this.unregister(entry.containerId);
-      try { await entry.onStuck('container heartbeat stale'); } catch {}
-      try { await this.killContainer(entry.containerId); } catch {}
+      for (const entry of stale) {
+        // Unregister BEFORE side effects so a concurrent register/unregister sees
+        // a consistent registry, and so onStuck cannot recursively re-mark.
+        this.unregister(entry.containerId);
+        try { await entry.onStuck('container heartbeat stale'); } catch {}
+        try { await this.killContainer(entry.containerId); } catch {}
+      }
+    } finally {
+      this.running = false;
     }
   }
 
