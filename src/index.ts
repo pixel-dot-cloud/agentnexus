@@ -10,6 +10,7 @@ import { runTurn } from './core/run-turn.js';
 import { resolveWiring, fallbackWiring } from './core/wiring.js';
 import { startScheduler, stopScheduler } from './core/scheduler.js';
 import { sweeper } from './core/sweep.js';
+import { stopCredProxy } from './core/cred-proxy.js';
 import type { ChannelAdapter, InboundContext, InboundMessage } from './channels/types.js';
 
 const args = process.argv.slice(2);
@@ -121,6 +122,7 @@ async function runDaemon(cliArgs: string[]): Promise<void> {
     console.log('Shutting down...');
     sweeper.stop();
     stopScheduler();
+    stopCredProxy();
     await stopAdapters();
     process.exit(0);
   };

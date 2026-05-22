@@ -13,7 +13,6 @@
 import * as readline from 'readline';
 import * as fs from 'fs';
 import {
-  ProviderFactory,
   AnthropicProvider,
   OpenAICompatibleProvider,
   type ProviderConfig,
@@ -39,6 +38,15 @@ if (!PROXY_BASE_URL || !AGENT_TOKEN) {
 
 function send(msg: object): void {
   process.stdout.write(JSON.stringify(msg) + '\n');
+}
+
+function sendAndExit(msg: object, code: number): void {
+  const line = JSON.stringify(msg) + '\n';
+  const flushed = process.stdout.write(line, () => process.exit(code));
+  if (!flushed) {
+    // Backpressure — wait for drain explicitly so exit doesn't race the buffer.
+    process.stdout.once('drain', () => process.exit(code));
+  }
 }
 
 // Pending host-side tool results, keyed by callId
@@ -142,7 +150,12 @@ async function main(): Promise<void> {
 
   // Background heartbeat — update mtime every 30s while a turn is in progress.
   let hbInterval: ReturnType<typeof setInterval> | null = setInterval(() => {
-    try { const now = new Date(); fs.utimes('/heartbeat', now, now, () => {}); } catch {}
+    try {
+      const now = new Date();
+      fs.utimes('/heartbeat', now, now, (err) => {
+        if (err) process.stderr.write(`[runner] heartbeat utimes failed: ${err.message}\n`);
+      });
+    } catch {}
   }, 30_000);
 
   const stopHeartbeat = (): void => {
@@ -198,13 +211,13 @@ async function main(): Promise<void> {
     );
 
     stopHeartbeat();
-    send({ type: 'done', history: result.history, usage: result.usage });
+    sendAndExit({ type: 'done', history: result.history, usage: result.usage }, 0);
+    return;
   } catch (e: any) {
     stopHeartbeat();
-    send({ type: 'error', message: e?.message ?? String(e) });
+    sendAndExit({ type: 'error', message: e?.message ?? String(e) }, 0);
+    return;
   }
-
-  process.exit(0);
 }
 
 main().catch((e) => {
