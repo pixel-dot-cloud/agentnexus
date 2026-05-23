@@ -385,6 +385,19 @@ export class ConfigManager {
     return true;
   }
 
+  removeModel(id: string, provider?: string): boolean {
+    const before = this.config.models.length;
+    this.config.models = this.config.models.filter(m =>
+      !(m.id === id && (!provider || m.provider === provider))
+    );
+    if (this.config.models.length === before) return false;
+    if (this.config.activeModel === id) {
+      this.config.activeModel = this.config.models[0]?.id ?? '';
+    }
+    this.save();
+    return true;
+  }
+
   getEnabledTools(): Tool[] {
     return this.config.tools.filter(t => t.enabled);
   }

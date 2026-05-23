@@ -395,8 +395,16 @@ export class OpenAICompatibleProvider extends LLMProvider {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (this.config.apiKey) headers['Authorization'] = `Bearer ${this.config.apiKey}`;
 
+      // Normalise endpoint: bare base URL (no path) → append /v1/chat/completions.
+      // Stored endpoint may be "http://host:1234" (setup default) or the full path.
+      const epRaw = this.config.endpoint || 'http://localhost:1234/v1/chat/completions';
+      const epUrl = new URL(epRaw);
+      const chatEndpoint = epUrl.pathname === '/'
+        ? `${epUrl.origin}/v1/chat/completions`
+        : epRaw;
+
       const response = await fetch(
-        this.config.endpoint || 'http://localhost:1234/v1/chat/completions',
+        chatEndpoint,
         {
           method: 'POST',
           body: JSON.stringify(body),
