@@ -14,15 +14,55 @@ import { stopCredProxy } from './core/cred-proxy.js';
 import type { ChannelAdapter, InboundContext, InboundMessage } from './channels/types.js';
 
 const args = process.argv.slice(2);
+const cmd  = args[0];
 
-if (args.includes('--setup') || args.includes('setup')) {
+if (cmd === 'setup') {
   await runSetup();
-} else if (args.includes('--config') || args.includes('config')) {
+} else if (cmd === 'config') {
   const config = new ConfigManager();
   await runConfigMenu(config);
   process.exit(0);
+} else if (cmd === 'cli') {
+  await runTui();
+} else if (cmd === 'help' || cmd === '--help' || cmd === '-h') {
+  showHelp();
+  process.exit(0);
+} else if (cmd === 'serve' || cmd === 'daemon' || cmd === 'gateway') {
+  await runDaemon(args.slice(1));
+} else if (!cmd) {
+  showHelp();
+  process.exit(0);
 } else {
-  await runDaemon(args);
+  console.error(`Unknown command: ${cmd}`);
+  showHelp();
+  process.exit(1);
+}
+
+function showHelp(): void {
+  console.log(`
+AgentNexus — multi-bot LLM agent daemon
+
+Usage:
+  agentnexus setup           Run the setup wizard
+  agentnexus serve           Start the daemon (Telegram + configured channels)
+  agentnexus cli             TUI config then start terminal chat
+  agentnexus config          Open interactive config menu
+  agentnexus help            Show this help
+
+Serve flags (after 'serve'):
+  --no-telegram              Skip Telegram adapters
+  --cli-only                 Only start the terminal channel
+  --no-cron                  Disable cron scheduler
+`.trim());
+}
+
+async function runTui(): Promise<void> {
+  const config = new ConfigManager();
+  const { AgentNexusTuiCLI } = await import('./lib/tui-cli.js');
+  const tui = new AgentNexusTuiCLI(config);
+  await tui.run();
+  // 'Start chat' returns from tui.run() → launch daemon with CLI channel only.
+  await runDaemon(['--cli-only']);
 }
 
 function defaultIdentity(text: string): string[] {
@@ -39,7 +79,7 @@ async function runDaemon(cliArgs: string[]): Promise<void> {
 
   const bots = enableTelegram ? config.getBots() : [];
   if (enableTelegram && !bots.length && !enableCli) {
-    console.error('No Telegram bots configured. Run: agentnexus --setup or --cli to use the terminal channel.');
+    console.error('No Telegram bots configured. Run: agentnexus setup  or  agentnexus cli  to use the terminal channel.');
     process.exit(1);
   }
 
@@ -262,8 +302,8 @@ async function runSetup(): Promise<void> {
   rl.close();
 
   console.log(`\nConfig saved to ${CONFIG_DIR}/config.json`);
-  console.log('\nRun: agentnexus           (start daemon — Telegram)');
-  console.log('     agentnexus --cli      (terminal channel)');
-  console.log('     agentnexus --config   (open interactive config menu)');
-  console.log('     agentnexus --setup    (re-run this wizard)');
+  console.log('\nRun: agentnexus serve      (start daemon — Telegram)');
+  console.log('     agentnexus cli        (terminal channel with TUI config)');
+  console.log('     agentnexus config     (open interactive config menu)');
+  console.log('     agentnexus setup      (re-run this wizard)');
 }
