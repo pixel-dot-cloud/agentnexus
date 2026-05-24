@@ -1,45 +1,95 @@
 import stripAnsi from 'strip-ansi';
 
-const TELEGRAM_MAX_LENGTH = 4096;
+const TARGET_CHUNK = 1500;
+const MAX_CHUNK    = 2800;
+const HARD_LIMIT   = 4096;
+
 const DEFAULT_TOOL_RESULT_MAX = 1500;
 
+/**
+ * Smart splitter. Priority: paragraph → line → sentence → clause → space.
+ * Never splits mid-word. Hard-slices any token > HARD_LIMIT.
+ * Each returned chunk is <= HARD_LIMIT.
+ */
 export function formatForTelegram(text: string): string[] {
-  // C5: collapse 3+ consecutive newlines to 2
+  // Collapse 3+ consecutive newlines to 2
   const clean = stripAnsi(text).trim().replace(/\n{3,}/g, '\n\n');
   if (!clean) return [];
 
-  const chunks: string[] = [];
-  let current = '';
-
-  for (const line of clean.split('\n')) {
-    const addition = current ? '\n' + line : line;
-    if ((current + addition).length > TELEGRAM_MAX_LENGTH) {
-      if (current) chunks.push(current);
-      current = line;
-    } else {
-      current += addition;
-    }
-  }
-  if (current) chunks.push(current);
-
-  // C1: hard-slice any chunk that still exceeds the limit (e.g. minified single line)
   const result: string[] = [];
-  for (const chunk of chunks) {
-    if (chunk.length <= TELEGRAM_MAX_LENGTH) {
-      result.push(chunk);
+  let remaining = clean;
+
+  while (remaining.length > 0) {
+    if (remaining.length <= MAX_CHUNK) {
+      result.push(remaining);
+      break;
+    }
+
+    // Search window: from TARGET_CHUNK backwards toward 0 for a nice break,
+    // and from TARGET_CHUNK forward to MAX_CHUNK for a fallback break.
+    const chunk = findSplitPoint(remaining);
+    result.push(chunk);
+    remaining = remaining.slice(chunk.length).replace(/^\s+/, '');
+  }
+
+  // Hard-slice any chunk that still exceeds HARD_LIMIT (shouldn't happen but safety net)
+  const safe: string[] = [];
+  for (const chunk of result) {
+    if (chunk.length <= HARD_LIMIT) {
+      safe.push(chunk);
     } else {
       let pos = 0;
       while (pos < chunk.length) {
-        result.push(chunk.slice(pos, pos + TELEGRAM_MAX_LENGTH));
-        pos += TELEGRAM_MAX_LENGTH;
+        safe.push(chunk.slice(pos, pos + HARD_LIMIT));
+        pos += HARD_LIMIT;
       }
     }
   }
 
-  return result.filter(c => c.trim().length > 0);
+  return safe.filter(c => c.trim().length > 0);
 }
 
-// C2: plain text only — no backticks or Markdown syntax
+function findSplitPoint(text: string): string {
+  // text.length > MAX_CHUNK guaranteed by caller
+
+  // Try paragraph break within TARGET_CHUNK..MAX_CHUNK window
+  const idx = findLastOf(text, '\n\n', TARGET_CHUNK, MAX_CHUNK);
+  if (idx !== -1) return text.slice(0, idx);
+
+  // Try line break
+  const idxLine = findLastOf(text, '\n', TARGET_CHUNK, MAX_CHUNK);
+  if (idxLine !== -1) return text.slice(0, idxLine);
+
+  // Try sentence terminators (". ", "! ", "? ")
+  for (const sep of ['. ', '! ', '? ']) {
+    const i = findLastOf(text, sep, TARGET_CHUNK, MAX_CHUNK);
+    if (i !== -1) return text.slice(0, i + 1); // include the punctuation, drop the space
+  }
+
+  // Try clause separators (", ", "; ")
+  for (const sep of [', ', '; ']) {
+    const i = findLastOf(text, sep, TARGET_CHUNK, MAX_CHUNK);
+    if (i !== -1) return text.slice(0, i + 1);
+  }
+
+  // Try space
+  const idxSpace = findLastOf(text, ' ', TARGET_CHUNK, MAX_CHUNK);
+  if (idxSpace !== -1) return text.slice(0, idxSpace);
+
+  // No good break found — hard cap at MAX_CHUNK (never splits mid-codepoint for ASCII;
+  // for full Unicode safety we'd walk back from codepoint boundary, but Telegram is UTF-16
+  // and grammy handles this — best effort here)
+  return text.slice(0, MAX_CHUNK);
+}
+
+/** Returns last occurrence of `needle` in text[0..end], that is >= start. -1 if not found. */
+function findLastOf(text: string, needle: string, start: number, end: number): number {
+  const searchIn = text.slice(0, end);
+  const idx = searchIn.lastIndexOf(needle);
+  return idx >= start ? idx : -1;
+}
+
+// Plain text only — no backticks or Markdown syntax
 export function formatToolCall(name: string, args: Record<string, unknown>): string {
   if (name === 'shell_execute') {
     const cmd = typeof args.command === 'string' ? args.command : JSON.stringify(args);
@@ -58,17 +108,17 @@ export function formatToolCall(name: string, args: Record<string, unknown>): str
   return `⚙️ ${name}: ${argsStr}`;
 }
 
-// C3: show first 1500 chars instead of dropping to a char count
-// TODO: for output > 4000 chars, consider sending as a .txt document via bot.api.sendDocument
+/**
+ * Returns null on success (suppress spam).
+ * Returns an error string on failure.
+ */
 export function formatToolResult(
   name: string,
   output: string,
   isError: boolean,
-  maxChars: number = DEFAULT_TOOL_RESULT_MAX,
-): string {
-  const prefix = isError ? '❌' : '✅';
-  if (output.length <= maxChars) {
-    return `${prefix} ${name}:\n${output}`;
-  }
-  return `${prefix} ${name}: (${output.length} chars, showing first ${maxChars})\n${output.slice(0, maxChars)}\n... [truncated]`;
+  _maxChars: number = DEFAULT_TOOL_RESULT_MAX,
+): string | null {
+  if (!isError) return null;
+  const msg = output.length <= 300 ? output : output.slice(0, 300) + '… [truncated]';
+  return `❌ ${name}: ${msg}`;
 }

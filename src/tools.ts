@@ -198,6 +198,12 @@ export class ToolRegistry {
       .map(t => ({ name: t.name, description: t.description, schema: t.schema }));
   }
 
+  clone(): ToolRegistry {
+    const copy = new ToolRegistry();
+    for (const [, tool] of this.tools) copy.registerTool(tool);
+    return copy;
+  }
+
   async executeTool(name: string, args: any): Promise<ToolResult> {
     const tool = this.getTool(name);
     if (!tool) {

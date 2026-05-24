@@ -115,3 +115,7 @@ export function resolveAgent(name: string | undefined): AgentDefinition {
   if (!name || name === DEFAULT_AGENT_NAME) return getDefaultAgent();
   return getAgent(name) ?? getDefaultAgent();
 }
+
+export function agentDisplayName(agent: AgentDefinition): string {
+  return agent.displayName ?? agent.name ?? 'agent';
+}

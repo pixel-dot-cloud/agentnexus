@@ -17,6 +17,8 @@ import { installModelPickerHandler } from '../telegram/model-picker.js';
 import { installConfigMenuHandler, routeInputForChat } from '../telegram/config-menu.js';
 import { registerCommands } from '../telegram/commands.js';
 import { formatForTelegram, formatToolCall as tgFormatToolCall, formatToolResult as tgFormatToolResult } from '../telegram/formatter.js';
+import { botPool } from '../lib/bot-pool.js';
+import { subagentRegistry } from '../lib/subagent-registry.js';
 import { dbg, dbgErr } from '../lib/debug.js';
 
 const CHANNEL_TYPE = 'telegram';
@@ -76,7 +78,26 @@ export function createTelegramAdapter(inst: BotInstance, config: ConfigManager):
         const userText = ctx.message.text;
         if (!userText?.trim()) return;
 
-        // Config-menu input capture (multi-step prompts).
+        // Pool-bot routing: if this bot is a pool bot, route to bound subagent inbox.
+        if (inst.pool === true) {
+          const agentId = botPool.getBoundAgent(inst.name);
+          if (!agentId) {
+            dbg('tg.pool.unbound.drop', { bot: inst.name, chatId });
+            console.log(`[pool] ${inst.name}: unbound, dropping message from chat ${chatId}`);
+            return;
+          }
+          const session = subagentRegistry.get(agentId);
+          if (!session) {
+            dbg('tg.pool.noSession', { bot: inst.name, agentId });
+            return;
+          }
+          botPool.touchUserChat(inst.name, chatId.toString());
+          session.userInbox.push(userText);
+          dbg('tg.pool.routed', { bot: inst.name, agentId, chatId });
+          return;
+        }
+
+        // Config-menu input capture (multi-step prompts) — main bots only.
         const consumed = await routeInputForChat(bot, chatId, userText, config);
         if (consumed) return;
 
@@ -111,6 +132,7 @@ export function createTelegramAdapter(inst: BotInstance, config: ConfigManager):
 
       bot.api.setMyCommands([
         { command: 'start',     description: 'Greeting and usage' },
+        { command: 'new',       description: 'Start new conversation' },
         { command: 'clear',     description: 'Reset conversation' },
         { command: 'config',    description: 'Open interactive config menu' },
         { command: 'model',     description: 'List or switch model' },
@@ -139,9 +161,10 @@ export function createTelegramAdapter(inst: BotInstance, config: ConfigManager):
       const chatId = Number(platformId);
       let lastMsgId: number | undefined;
       if (msg.text) {
+        const sendOpts = msg.parseMode ? { parse_mode: msg.parseMode as 'HTML' | 'Markdown' | 'MarkdownV2' } : {};
         for (const chunk of formatForTelegram(msg.text)) {
           try {
-            const sent = await bot.api.sendMessage(chatId, chunk);
+            const sent = await bot.api.sendMessage(chatId, chunk, sendOpts);
             lastMsgId = sent.message_id;
           } catch (e) { dbgErr('tg.deliver', e); }
         }

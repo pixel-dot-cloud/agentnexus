@@ -7,7 +7,7 @@ import type { AgentDefinition } from './agents.js';
 import type { PermissionMode } from '../lib/permission-modes.js';
 
 import { defaultToolRegistry } from '../tools.js';
-import { ProviderFactory } from '../providers.js';
+import { ProviderFactory, AUTO_MODEL } from '../providers.js';
 import { runAgentLoop, type ToolExecutor } from '../lib/agent-loop.js';
 import { ConsentManager } from '../lib/consent.js';
 import { loadPrompt } from '../lib/prompts.js';
@@ -31,6 +31,15 @@ import {
 } from './cred-proxy.js';
 import { runTurnViaRunner, type RunTurnPayload } from './runner-bridge.js';
 import { sweeper } from './sweep.js';
+import { pushTurnContext, popTurnContext } from './turn-context.js';
+import { agentDisplayName } from './agents.js';
+import { subagentRegistry } from '../lib/subagent-registry.js';
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+const HTML_BODY_LIMIT = 4000;
 
 /**
  * Per-conversation state owned by each adapter (per-platformId / per-threadId).
@@ -102,6 +111,45 @@ export interface RunTurnArgs {
  * adapter, persists the session. Channel-specific concerns (consent UI,
  * message chunking, tool-result formatting) come through callbacks.
  */
+/**
+ * Returns an onText callback that prefixes the first non-empty body with the
+ * agent name. For Telegram (html parseMode available) uses HTML bold header;
+ * for CLI uses plain `name:\n`. Subsequent chunks stream without prefix.
+ */
+function makeOnText(
+  name: string,
+  isTelegram: boolean,
+  deliver: (payload: { text: string; parseMode?: string }) => Promise<void>,
+  formatOutbound: (text: string) => string[],
+): (t: string) => Promise<void> {
+  let prefixed = false;
+  return async (t: string) => {
+    if (!prefixed && t.trim()) {
+      prefixed = true;
+      if (isTelegram) {
+        const header = `<b>${escapeHtml(name)}</b>`;
+        const bodyEscaped = escapeHtml(t);
+        if (bodyEscaped.length <= HTML_BODY_LIMIT) {
+          await deliver({ text: `${header}\n${bodyEscaped}`, parseMode: 'HTML' }).catch(() => {});
+        } else {
+          await deliver({ text: header, parseMode: 'HTML' }).catch(() => {});
+          for (const chunk of formatOutbound(t)) {
+            await deliver({ text: chunk }).catch(() => {});
+          }
+        }
+      } else {
+        for (const chunk of formatOutbound(`${name}:\n${t}`)) {
+          await deliver({ text: chunk }).catch(() => {});
+        }
+      }
+      return;
+    }
+    for (const chunk of formatOutbound(t)) {
+      await deliver({ text: chunk }).catch(() => {});
+    }
+  };
+}
+
 export async function runTurn(a: RunTurnArgs): Promise<void> {
   const { text, state, agent, config, adapter, platformId, threadId, formatOutbound } = a;
 
@@ -113,6 +161,9 @@ export async function runTurn(a: RunTurnArgs): Promise<void> {
   state.isRunning = true;
   const ac = new AbortController();
   state.abortCtrl = ac;
+
+  // F4: push turn context so per-spawn tools (e.g. MessageUserTool) can find it.
+  pushTurnContext({ adapter, platformId, threadId, agentName: agent.name });
 
   await adapter.setTyping?.(platformId, threadId).catch(() => {});
   const typingMs = Math.max(1, config.getTypingIntervalSec()) * 1000;
@@ -133,6 +184,7 @@ export async function runTurn(a: RunTurnArgs): Promise<void> {
     clearInterval(typingInterval);
     state.isRunning = false;
     state.abortCtrl = undefined;
+    popTurnContext();
     await adapter.deliver(platformId, threadId, { text: 'No model configured. Use /config.' }).catch(() => {});
     return;
   }
@@ -143,7 +195,21 @@ export async function runTurn(a: RunTurnArgs): Promise<void> {
     apiKey:   provider.apiKey,
   });
 
-  const systemPrompt   = buildSystemPrompt(agent);
+  // Build system prompt + inject subagent pending block (F3).
+  let systemPrompt = buildSystemPrompt(agent);
+  const pending = subagentRegistry.unreadSummary();
+  if (pending.length > 0) {
+    const lines = pending.map(p => `- ${p.id}: ${p.unread} unread messages`).join('\n');
+    systemPrompt += `\n\n<subagent-pending>\n${lines}\n</subagent-pending>`;
+  }
+
+  const isTelegram = adapter.channelType === 'telegram';
+  const name = agentDisplayName(agent);
+  const deliverFn = async (payload: { text: string; parseMode?: string }): Promise<void> => {
+    await adapter.deliver(platformId, threadId, payload as any);
+  };
+  const onTextWithPrefix = makeOnText(name, isTelegram, deliverFn, formatOutbound);
+
   const consent        = new ConsentManager(() => state.permMode);
   const buildToolSpecs = () => {
     let specs = defaultToolRegistry.getToolSpecs();
@@ -185,6 +251,7 @@ export async function runTurn(a: RunTurnArgs): Promise<void> {
       state.isRunning = false;
       state.abortCtrl = undefined;
       if (overlay.length) setActiveSkills(baselineSkills);
+      popTurnContext();
       await adapter.deliver(platformId, threadId, {
         text: 'Error: Docker not available. Install Docker or disable agent.container.enabled.',
       }).catch(() => {});
@@ -200,6 +267,7 @@ export async function runTurn(a: RunTurnArgs): Promise<void> {
         state.isRunning = false;
         state.abortCtrl = undefined;
         if (overlay.length) setActiveSkills(baselineSkills);
+        popTurnContext();
         await adapter.deliver(platformId, threadId, {
           text: "Error: container.credProxy.enabled is false — cannot use full mode.",
         }).catch(() => {});
@@ -214,6 +282,7 @@ export async function runTurn(a: RunTurnArgs): Promise<void> {
         state.isRunning = false;
         state.abortCtrl = undefined;
         if (overlay.length) setActiveSkills(baselineSkills);
+        popTurnContext();
         await adapter.deliver(platformId, threadId, {
           text: `Error: runner image "${runnerImage}" not found. Build it first: bash container/build.sh`,
         }).catch(() => {});
@@ -232,6 +301,7 @@ export async function runTurn(a: RunTurnArgs): Promise<void> {
         state.isRunning = false;
         state.abortCtrl = undefined;
         if (overlay.length) setActiveSkills(baselineSkills);
+        popTurnContext();
         await adapter.deliver(platformId, threadId, {
           text: `Error: failed to start cred-proxy: ${e?.message ?? String(e)}`,
         }).catch(() => {});
@@ -247,6 +317,7 @@ export async function runTurn(a: RunTurnArgs): Promise<void> {
         state.isRunning = false;
         state.abortCtrl = undefined;
         if (overlay.length) setActiveSkills(baselineSkills);
+        popTurnContext();
         await adapter.deliver(platformId, threadId, {
           text: `Error: failed to ensure Docker network "${networkName}": ${e?.message ?? String(e)}`,
         }).catch(() => {});
@@ -274,6 +345,14 @@ export async function runTurn(a: RunTurnArgs): Promise<void> {
       const hostToolExec = (name: string, args: unknown) =>
         defaultToolRegistry.executeTool(name, args as any);
 
+      // Resolve __auto__ to a concrete model ID on the host before handing off
+      // to the runner. The runner uses OpenAICompatibleProvider which can't
+      // resolve AUTO_MODEL via the native LM Studio API.
+      let resolvedModelId = model.id;
+      if (model.id === AUTO_MODEL) {
+        try { resolvedModelId = await llm.resolveModel(ac.signal); } catch {}
+      }
+
       const bridgePayload: RunTurnPayload = {
         text,
         history: state.history,
@@ -281,7 +360,7 @@ export async function runTurn(a: RunTurnArgs): Promise<void> {
         tools:        containerToolSpecs,
         proxyBaseUrl,
         agentToken,
-        modelId:      model.id,
+        modelId:      resolvedModelId,
         providerType: provider.type,
         maxIter:      config.getMaxToolIter(),
       };
@@ -313,11 +392,7 @@ export async function runTurn(a: RunTurnArgs): Promise<void> {
             });
           },
           callbacks: {
-            onText: async (t) => {
-              for (const chunk of formatOutbound(t)) {
-                await adapter.deliver(platformId, threadId, { text: chunk }).catch((e) => dbgErr('runTurn.deliver', e));
-              }
-            },
+            onText: onTextWithPrefix,
             onStream:   () => {},
             onToolCall: async (name, args) => {
               const t = a.onToolCallText?.(name, args);
@@ -366,6 +441,7 @@ export async function runTurn(a: RunTurnArgs): Promise<void> {
         if (overlay.length) setActiveSkills(baselineSkills);
         revokeAgentToken(agentToken);
         if (sweptContainerId) sweeper.unregister(sweptContainerId);
+        popTurnContext();
       }
       return;  // full mode handled above; skip standard path below
 
@@ -378,6 +454,7 @@ export async function runTurn(a: RunTurnArgs): Promise<void> {
         state.isRunning = false;
         state.abortCtrl = undefined;
         if (overlay.length) setActiveSkills(baselineSkills);
+        popTurnContext();
         await adapter.deliver(platformId, threadId, {
           text: `Error: sandbox spawn failed: ${e?.message ?? String(e)}`,
         }).catch(() => {});
@@ -397,11 +474,7 @@ export async function runTurn(a: RunTurnArgs): Promise<void> {
       systemPrompt,
       consent,
       {
-        onText: async (t) => {
-          for (const chunk of formatOutbound(t)) {
-            await adapter.deliver(platformId, threadId, { text: chunk }).catch((e) => dbgErr('runTurn.deliver', e));
-          }
-        },
+        onText: onTextWithPrefix,
         onStream:   () => {},
         onToolCall: async (name, args) => {
           const t = a.onToolCallText?.(name, args);
@@ -445,5 +518,6 @@ export async function runTurn(a: RunTurnArgs): Promise<void> {
     if (sandbox) {
       try { await teardownSandbox(sandbox); } catch (e) { dbgErr('runTurn.teardown', e); }
     }
+    popTurnContext();
   }
 }

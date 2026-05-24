@@ -1,0 +1,18 @@
+[Unit]
+Description=AgentNexus LLM Agent Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=NODE_BIN INSTALL_DIR/dist/index.js serve
+WorkingDirectory=INSTALL_DIR
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=agentnexus
+# Environment=NODE_ENV=production
+
+[Install]
+WantedBy=default.target

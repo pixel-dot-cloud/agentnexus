@@ -1,6 +1,7 @@
 import fetch from 'node-fetch';
 import * as rl from 'readline';
 import { GoogleGenAI } from '@google/genai';
+import { parseDeepseekToolCalls } from './lib/deepseek-toolcalls.js';
 
 export const AUTO_MODEL = '__auto__';
 
@@ -163,7 +164,9 @@ export class OllamaProvider extends LLMProvider {
     const hit = this.resolveCacheHit();
     if (hit) return hit;
     try {
-      const base = new URL(this.config.endpoint || 'http://localhost:11434/api/generate').origin;
+      const u = new URL(this.config.endpoint || 'http://localhost:11434/api/generate');
+      const proxyPrefix = u.pathname.match(/^(\/proxy\/[^/]+)/)?.[1] ?? '';
+      const base = u.origin + proxyPrefix;
       const res = await fetch(`${base}/api/ps`, { signal: signal as any });
       if (res.ok) {
         const json = (await res.json()) as any;
@@ -231,7 +234,10 @@ export class OllamaProvider extends LLMProvider {
 
     try {
       const endpoint = this.config.endpoint || 'http://localhost:11434/api/generate';
-      const chatEndpoint = new URL(endpoint).origin + '/api/chat';
+      const u = new URL(endpoint);
+      const proxyPrefix = u.pathname.match(/^(\/proxy\/[^/]+)/)?.[1] ?? '';
+      const base = u.origin + proxyPrefix;
+      const chatEndpoint = base + '/api/chat';
 
       const response = await fetch(chatEndpoint, {
         method: 'POST',
@@ -293,9 +299,20 @@ export class OllamaProvider extends LLMProvider {
         signal?.removeEventListener('abort', onAbortClose);
       }
 
+      // DeepSeek post-stream parser: extract tool calls embedded in text tokens.
+      let finalToolCalls: ToolCall[] = toolCalls;
+      let finalBuffer = buffer;
+      if (finalToolCalls.length === 0 && finalBuffer.length > 0) {
+        const parsed = parseDeepseekToolCalls(finalBuffer);
+        if (parsed.toolCalls.length > 0) {
+          finalToolCalls = parsed.toolCalls;
+          finalBuffer = parsed.text;
+        }
+      }
+
       const usage = (inputTokens > 0 || outputTokens > 0) ? { inputTokens, outputTokens } : undefined;
-      if (signal?.aborted) return { content: buffer, toolCalls, aborted: true, usage };
-      return { content: buffer, toolCalls, usage };
+      if (signal?.aborted) return { content: finalBuffer, toolCalls: finalToolCalls, aborted: true, usage };
+      return { content: finalBuffer, toolCalls: finalToolCalls, usage };
     } catch (err: any) {
       return this.handleError(err);
     } finally {
@@ -307,7 +324,9 @@ export class OllamaProvider extends LLMProvider {
   async listModels(signal?: AbortSignal): Promise<string[]> {
     try {
       const endpoint = this.config.endpoint || 'http://localhost:11434/api/generate';
-      const base = new URL(endpoint).origin;
+      const u = new URL(endpoint);
+      const proxyPrefix = u.pathname.match(/^(\/proxy\/[^/]+)/)?.[1] ?? '';
+      const base = u.origin + proxyPrefix;
       const res = await fetch(`${base}/api/tags`, { signal: signal as any });
       if (!res.ok) return [];
       const json = (await res.json()) as any;
@@ -399,9 +418,15 @@ export class OpenAICompatibleProvider extends LLMProvider {
       // Stored endpoint may be "http://host:1234" (setup default) or the full path.
       const epRaw = this.config.endpoint || 'http://localhost:1234/v1/chat/completions';
       const epUrl = new URL(epRaw);
-      const chatEndpoint = epUrl.pathname === '/'
-        ? `${epUrl.origin}/v1/chat/completions`
-        : epRaw;
+      const epPath = epUrl.pathname.replace(/\/$/, '');
+      let chatEndpoint: string;
+      if (epPath === '' || epPath === '/v1') {
+        chatEndpoint = `${epUrl.origin}/v1/chat/completions`;
+      } else if (/^\/proxy\/[^/]+$/.test(epPath)) {
+        chatEndpoint = `${epUrl.origin}${epPath}/v1/chat/completions`;
+      } else {
+        chatEndpoint = epRaw;
+      }
 
       const response = await fetch(
         chatEndpoint,
@@ -471,13 +496,22 @@ export class OpenAICompatibleProvider extends LLMProvider {
         signal?.removeEventListener('abort', onAbortClose);
       }
 
-      const toolCalls: ToolCall[] = [];
+      let toolCalls: ToolCall[] = [];
       for (const [idx, e] of [...tcByIdx.entries()].sort((a, b) => a[0] - b[0])) {
         toolCalls.push({
           id: e.id ?? `call_${idx}_${Date.now()}`,
           name: e.name ?? '',
           args: safeJsonParse(e.argsBuf),
         });
+      }
+
+      // DeepSeek post-stream parser: extract tool calls embedded in text tokens.
+      if (toolCalls.length === 0 && buffer.length > 0) {
+        const parsed = parseDeepseekToolCalls(buffer);
+        if (parsed.toolCalls.length > 0) {
+          toolCalls = parsed.toolCalls;
+          buffer = parsed.text;
+        }
       }
 
       const usage = (inputTokens > 0 || outputTokens > 0)
@@ -496,7 +530,9 @@ export class OpenAICompatibleProvider extends LLMProvider {
   async listModels(signal?: AbortSignal): Promise<string[]> {
     try {
       const endpoint = this.config.endpoint || 'http://localhost:1234/v1/chat/completions';
-      const base = new URL(endpoint).origin;
+      const u = new URL(endpoint);
+      const proxyPrefix = u.pathname.match(/^(\/proxy\/[^/]+)/)?.[1] ?? '';
+      const base = u.origin + proxyPrefix;
       const headers: Record<string, string> = {};
       if (this.config.apiKey) headers['Authorization'] = `Bearer ${this.config.apiKey}`;
       const res = await fetch(`${base}/v1/models`, { headers, signal: signal as any });

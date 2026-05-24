@@ -25,10 +25,12 @@ export interface Tool {
 }
 
 export interface BotInstance {
-  name:           string;
-  botToken:       string;
-  allowedUsers:   number[];
+  name:            string;
+  botToken:        string;
+  allowedUsers:    number[];
   permissionMode?: PermissionMode;
+  /** True → bot belongs to the pool; managed by AssignBotTool / ReleaseBotTool. */
+  pool?:           boolean;
 }
 
 export interface TelegramConfig {

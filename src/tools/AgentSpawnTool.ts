@@ -4,6 +4,12 @@ import type { ChatMessage, LLMProvider } from '../providers.js';
 import type { ConsentManager } from '../lib/consent.js';
 import type { HookManager } from '../lib/hooks-manager.js';
 import { runSubAgent, type SubAgentEvent, type SubAgentOptions } from '../lib/sub-agent.js';
+import { subagentRegistry, MAX_RUNNING_SUBAGENTS, type SubagentSession } from '../lib/subagent-registry.js';
+import { currentTurnContext } from '../core/turn-context.js';
+import { MessageLeaderTool } from './MessageLeaderTool.js';
+import { MessageUserTool } from './MessageUserTool.js';
+import { ReadUserMessagesTool } from './ReadUserMessagesTool.js';
+import { MessagePeerTool } from './MessagePeerTool.js';
 
 export interface AgentSpawnDeps {
   getLLM:        (model?: string) => LLMProvider;
@@ -16,7 +22,7 @@ export interface AgentSpawnDeps {
 
 export class AgentSpawnTool extends BaseTool {
   name        = 'agent_spawn';
-  description = 'Spawn isolated sub-agent. kinds: general (full tools), explore (read-only), fork (inherits parent history). Returns sub-agent final output.';
+  description = 'Spawn isolated sub-agent. kinds: general (full tools), explore (read-only), fork (inherits parent history). Returns agentId immediately; agent runs async.';
   usage       = 'agent_spawn({"task":"find all TODOs","kind":"explore"})';
   schema = {
     type: 'object',
@@ -47,12 +53,53 @@ export class AgentSpawnTool extends BaseTool {
       return { success: false, output: '', error: `Invalid kind: ${args.kind}` };
     }
 
+    if (subagentRegistry.runningCount() >= MAX_RUNNING_SUBAGENTS) {
+      return { success: false, output: '', error: `Max running subagents reached (${MAX_RUNNING_SUBAGENTS})` };
+    }
+
     const id = typeof (globalThis as any).crypto?.randomUUID === 'function'
       ? (globalThis as any).crypto.randomUUID()
       : `sub_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
+    const abort = new AbortController();
+
     const cfg = this.deps.getConfig?.();
     const parentMessages = args.kind === 'fork' ? cfg?.parentMessages : undefined;
+
+    const session: SubagentSession = {
+      id,
+      parentId:   undefined,
+      task:       args.task,
+      kind:       args.kind,
+      status:     'running',
+      inbox:      [],
+      userInbox:  [],
+      lastReadAt: Date.now(),
+      history:    [],
+      startedAt:  Date.now(),
+      abort,
+    };
+
+    subagentRegistry.register(session);
+
+    const childRegistry = this.deps.registry.clone();
+
+    // Per-spawn tools
+    childRegistry.registerTool(
+      new MessageLeaderTool((msg) => {
+        session.inbox.push(`[from ${session.name ?? id}] ${msg}`);
+      }),
+    );
+
+    const turnCtx = currentTurnContext();
+    if (turnCtx) {
+      childRegistry.registerTool(
+        new MessageUserTool(turnCtx, session.name ?? `agent:${id.slice(0, 8)}`, id),
+      );
+    }
+
+    childRegistry.registerTool(new ReadUserMessagesTool(session));
+    childRegistry.registerTool(new MessagePeerTool(id));
 
     const opts: SubAgentOptions = {
       task:           args.task,
@@ -62,23 +109,30 @@ export class AgentSpawnTool extends BaseTool {
       parentMessages,
     };
 
-    const onEvent = this.deps.onAgentEvent;
+    // Fire-and-forget
+    (async () => {
+      try {
+        const llm = this.deps.getLLM(args.model);
+        const output = await runSubAgent(opts, {
+          llm,
+          registry:         childRegistry,
+          consent:          this.deps.consent,
+          hooks:            this.deps.hooks,
+          onEvent:          this.deps.onAgentEvent,
+          signal:           abort.signal,
+          id,
+          onHistoryUpdate:  (h) => { session.history = h; },
+        });
+        session.result  = output;
+        session.status  = 'done';
+        session.endedAt = Date.now();
+      } catch (err: any) {
+        session.error   = err?.message ?? String(err);
+        session.status  = err?.message === 'aborted' ? 'aborted' : 'error';
+        session.endedAt = Date.now();
+      }
+    })();
 
-    try {
-      const llm = this.deps.getLLM(args.model);
-      const output = await runSubAgent(opts, {
-        llm,
-        registry: this.deps.registry,
-        consent:  this.deps.consent,
-        hooks:    this.deps.hooks,
-        onEvent,
-        id,
-      });
-      return { success: true, output };
-    } catch (err: any) {
-      const message = err?.message ?? String(err);
-      onEvent?.({ id, type: 'error', data: { message } });
-      return { success: false, output: '', error: message };
-    }
+    return { success: true, output: JSON.stringify({ agentId: id, status: 'running' }) };
   }
 }

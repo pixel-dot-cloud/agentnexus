@@ -103,7 +103,9 @@ export class LmStudioApi {
 
   constructor(endpoint: string | undefined, apiKey?: string) {
     const ep   = endpoint || 'http://localhost:1234/v1/chat/completions';
-    this.base  = new URL(ep).origin;
+    const u = new URL(ep);
+    const proxyPrefix = u.pathname.match(/^(\/proxy\/[^/]+)/)?.[1] ?? '';
+    this.base  = u.origin + proxyPrefix;
     this.apiKey = apiKey;
   }
 

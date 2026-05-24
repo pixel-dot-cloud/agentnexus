@@ -21,8 +21,20 @@ import {
 } from './providers.js';
 import { runAgentLoop } from './lib/agent-loop.js';
 import { ConsentManager } from './lib/consent.js';
+import { ShellExecuteTool, FileReadTool, FileWriteTool, DirectoryListTool, BaseTool } from './tools.js';
 import type { ToolResult } from './tools.js';
 import type { RunTurnPayload } from './core/runner-bridge.js';
+
+// ── Local tools (run inside container, not proxied to host) ───────────────────
+
+const LOCAL_TOOLS = new Map<string, BaseTool>([
+  ['shell_execute',   new ShellExecuteTool()],
+  ['file_read',       new FileReadTool()],
+  ['file_write',      new FileWriteTool()],
+  ['directory_list',  new DirectoryListTool()],
+]);
+
+// Tools not in LOCAL_TOOLS are proxied to the host via remoteExecuteTool.
 
 // ── Env ───────────────────────────────────────────────────────────────────────
 
@@ -124,7 +136,7 @@ rl.on('line', (line) => {
   }
 });
 
-// ── Custom tool executor (proxy to host) ──────────────────────────────────────
+// ── Tool executor ─────────────────────────────────────────────────────────────
 
 async function remoteExecuteTool(name: string, args: unknown): Promise<ToolResult> {
   const callId = `tc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -140,6 +152,16 @@ async function remoteExecuteTool(name: string, args: unknown): Promise<ToolResul
     output:  result.isError ? '' : result.output,
     error:   result.isError ? result.output : undefined,
   };
+}
+
+async function executeToolInContainer(name: string, args: unknown): Promise<ToolResult> {
+  const local = LOCAL_TOOLS.get(name);
+  if (local) {
+    // Runs entirely inside the container — isolated from host filesystem.
+    return local.execute(args as any);
+  }
+  // Coordination tools (agent_spawn, invoke_skill, message_user, etc.) proxy to host.
+  return remoteExecuteTool(name, args);
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -207,7 +229,7 @@ async function main(): Promise<void> {
       },
       abortCtrl.signal,
       maxIter,
-      remoteExecuteTool,
+      executeToolInContainer,
     );
 
     stopHeartbeat();

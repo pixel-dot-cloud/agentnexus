@@ -11,12 +11,18 @@ import { resolveWiring, fallbackWiring } from './core/wiring.js';
 import { startScheduler, stopScheduler } from './core/scheduler.js';
 import { sweeper } from './core/sweep.js';
 import { stopCredProxy } from './core/cred-proxy.js';
+import { botPool } from './lib/bot-pool.js';
+import { runImportCommand, runFilesCommand, WORKSPACE_HELP } from './lib/workspace-cli.js';
 import type { ChannelAdapter, InboundContext, InboundMessage } from './channels/types.js';
 
 const args = process.argv.slice(2);
 const cmd  = args[0];
 
-if (cmd === 'setup') {
+if (cmd === 'import') {
+  runImportCommand(args.slice(1));
+} else if (cmd === 'files' || cmd === 'workspace' || cmd === 'ws') {
+  runFilesCommand(args.slice(1));
+} else if (cmd === 'setup') {
   await runSetup();
 } else if (cmd === 'config') {
   const config = new ConfigManager();
@@ -43,16 +49,23 @@ function showHelp(): void {
 AgentNexus — multi-bot LLM agent daemon
 
 Usage:
-  agentnexus setup           Run the setup wizard
-  agentnexus serve           Start the daemon (Telegram + configured channels)
-  agentnexus cli             TUI config then start terminal chat
-  agentnexus config          Open interactive config menu
-  agentnexus help            Show this help
+  agentnexus setup                      Run the setup wizard
+  agentnexus serve                      Start the daemon (Telegram + configured channels)
+  agentnexus cli                        TUI config then start terminal chat
+  agentnexus config                     Open interactive config menu
+  agentnexus import <src> [agent]       Copy file/folder into agent workspace
+  agentnexus files [agent] <cmd>        Manage agent workspace files
+  agentnexus help                       Show this help
 
-Serve flags (after 'serve'):
+Serve flags:
   --no-telegram              Skip Telegram adapters
   --cli-only                 Only start the terminal channel
   --no-cron                  Disable cron scheduler
+  --verbose, -v              Log every inbound message, tool call, and subagent event
+
+Files subcommands:
+  ls [path]   show [file]   rm <path>   mkdir <path>
+  link [dest]   open   path
 `.trim());
 }
 
@@ -70,12 +83,17 @@ function defaultIdentity(text: string): string[] {
   return t ? [t] : [];
 }
 
+function ts(): string {
+  return new Date().toISOString().replace('T', ' ').slice(0, 23);
+}
+
 async function runDaemon(cliArgs: string[]): Promise<void> {
   const config = new ConfigManager();
 
   const enableTelegram = !cliArgs.includes('--no-telegram') && !cliArgs.includes('--cli-only');
   const enableCli      =  cliArgs.includes('--cli') || cliArgs.includes('--cli-only');
   const enableCron     = !cliArgs.includes('--no-cron');
+  const verbose        =  cliArgs.includes('--verbose') || cliArgs.includes('-v');
 
   const bots = enableTelegram ? config.getBots() : [];
   if (enableTelegram && !bots.length && !enableCli) {
@@ -86,7 +104,20 @@ async function runDaemon(cliArgs: string[]): Promise<void> {
   console.log('Starting AgentNexus daemon...');
 
   // Daemon-scoped wiring (tools, MCP, skills, hooks).
-  await setupDaemon(config);
+  await setupDaemon(config, {
+    onAgentEvent: verbose ? (ev) => {
+      const id = ev.id.slice(0, 8);
+      if (ev.type === 'start')      console.log(`${ts()} [↗] subagent:${id} spawned "${ev.data?.task ?? ''}"`);
+      else if (ev.type === 'end')   console.log(`${ts()} [↙] subagent:${id} done`);
+      else if (ev.type === 'error') console.log(`${ts()} [✗] subagent:${id} error: ${ev.data?.message}`);
+      else if (ev.type === 'tool_call')
+        console.log(`${ts()} [⚙] subagent:${id} ${ev.data?.name}: ${JSON.stringify(ev.data?.args ?? {}).slice(0, 120)}`);
+    } : undefined,
+  });
+
+  // Bot-pool init + restore persisted lastUserChat.
+  botPool.init(() => config.getBots());
+  botPool.load();
 
   // Register channel adapters.
   if (enableTelegram) {
@@ -113,10 +144,17 @@ async function runDaemon(cliArgs: string[]): Promise<void> {
         return;
       }
 
+      if (verbose) {
+        console.log(`${ts()} [→] ${ctx.adapterId ?? ctx.channelType}:${ctx.platformId} "${msg.text.slice(0, 120)}"`);
+      }
+
       const wiring = resolveWiring(ctx.channelType, ctx.platformId, ctx.threadId)
                   ?? fallbackWiring(ctx.channelType, ctx.platformId);
       const agent  = resolveAgent(wiring.agentName);
       const state  = adapter.getOrCreateState(ctx.platformId, ctx.threadId);
+
+      const baseToolCallText   = adapter.formatToolCall   ?? (() => null);
+      const baseToolResultText = adapter.formatToolResult ?? (() => null);
 
       await runTurn({
         text:            msg.text,
@@ -126,9 +164,16 @@ async function runDaemon(cliArgs: string[]): Promise<void> {
         adapter,
         platformId:      ctx.platformId,
         threadId:        ctx.threadId,
-        formatOutbound:  adapter.formatOutbound   ?? defaultIdentity,
-        onToolCallText:  adapter.formatToolCall   ?? (() => null),
-        onToolResultText: adapter.formatToolResult ?? (() => null),
+        formatOutbound:  adapter.formatOutbound ?? defaultIdentity,
+        onToolCallText: verbose ? (name, args) => {
+          console.log(`${ts()} [⚙] ${name}: ${JSON.stringify(args).slice(0, 200)}`);
+          return baseToolCallText(name, args);
+        } : baseToolCallText,
+        onToolResultText: verbose ? (name, output, isError) => {
+          const truncated = output.slice(0, 200);
+          console.log(`${ts()} [${isError ? '✗' : '✓'}] ${name}: ${truncated}`);
+          return baseToolResultText(name, output, isError);
+        } : baseToolResultText,
       });
     },
   };
@@ -160,6 +205,7 @@ async function runDaemon(cliArgs: string[]): Promise<void> {
 
   const shutdown = async () => {
     console.log('Shutting down...');
+    botPool.save();
     sweeper.stop();
     stopScheduler();
     stopCredProxy();

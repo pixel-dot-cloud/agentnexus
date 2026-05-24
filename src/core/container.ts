@@ -286,6 +286,8 @@ export function spawnRunnerProc(dockerPath: string, opts: RunnerProcOptions): Ch
     args.push('-v', `${mt.hostPath}:${mt.containerPath}${ro}`);
   }
 
+  // Start in the work directory so relative file paths resolve inside the container.
+  args.push('-w', '/work');
   args.push(opts.image);
 
   return spawn(dockerPath, args, { stdio: ['pipe', 'pipe', 'pipe'] });

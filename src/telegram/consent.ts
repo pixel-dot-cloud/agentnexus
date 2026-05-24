@@ -30,17 +30,20 @@ export function installConsentHandler(bot: Bot): void {
     clearTimeout(entry.timeout);
     pending.delete(messageId);
 
-    await ctx.answerCallbackQuery().catch(() => {});
+    // Answer immediately so Telegram dismisses the spinner without delay.
+    ctx.answerCallbackQuery().catch(() => {});
 
     const raw = ctx.callbackQuery.data.slice('consent:'.length);
     const chatId = ctx.callbackQuery.message!.chat.id;
 
-    await bot.api.editMessageText(
+    // Resolve first — unblocks the agent loop instantly.
+    entry.resolve(raw === 'deny' ? false : (raw as ConsentDecision));
+
+    // Edit the message async; outcome doesn't affect agent execution.
+    bot.api.editMessageText(
       chatId, messageId,
       `${raw === 'deny' ? '❌' : '✅'} ${entry.toolName} — ${raw}`,
     ).catch(() => {});
-
-    entry.resolve(raw === 'deny' ? false : (raw as ConsentDecision));
   });
 }
 
