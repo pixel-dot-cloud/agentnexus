@@ -2,6 +2,23 @@
 
 Personal AI agent daemon. Connects to Telegram, runs tasks autonomously, talks to local LLMs (LM Studio, Ollama) or cloud providers (Anthropic, Google). Supports multiple bots, container-isolated execution, subagents, and scheduled tasks.
 
+## install
+
+If you have the `gh` CLI authenticated:
+
+```bash
+bash <(gh api repos/pixel-dot-cloud/agentnexus/contents/install.sh --jq '.content' | base64 -d)
+```
+
+Or with a personal access token:
+
+```bash
+curl -fsSL -H "Authorization: token YOUR_TOKEN" \
+  https://raw.githubusercontent.com/pixel-dot-cloud/agentnexus/master/install.sh | bash
+```
+
+The script clones the repo, builds, and links the binary to `~/.local/bin/agentnexus`.
+
 ## requirements
 
 - Node.js 18+
