@@ -156,8 +156,7 @@ async function runDaemon(cliArgs: string[]): Promise<void> {
       const baseToolCallText   = adapter.formatToolCall   ?? (() => null);
       const baseToolResultText = adapter.formatToolResult ?? (() => null);
 
-      await runTurn({
-        text:            msg.text,
+      const turnArgs = {
         state,
         agent,
         config,
@@ -165,16 +164,24 @@ async function runDaemon(cliArgs: string[]): Promise<void> {
         platformId:      ctx.platformId,
         threadId:        ctx.threadId,
         formatOutbound:  adapter.formatOutbound ?? defaultIdentity,
-        onToolCallText: verbose ? (name, args) => {
+        onToolCallText: verbose ? (name: string, args: Record<string, unknown>) => {
           console.log(`${ts()} [⚙] ${name}: ${JSON.stringify(args).slice(0, 200)}`);
           return baseToolCallText(name, args);
         } : baseToolCallText,
-        onToolResultText: verbose ? (name, output, isError) => {
+        onToolResultText: verbose ? (name: string, output: string, isError: boolean) => {
           const truncated = output.slice(0, 200);
           console.log(`${ts()} [${isError ? '✗' : '✓'}] ${name}: ${truncated}`);
           return baseToolResultText(name, output, isError);
         } : baseToolResultText,
-      });
+      };
+
+      // Run turn then drain any queued messages (interrupt / queue mode).
+      await runTurn({ text: msg.text, ...turnArgs });
+      while (state.messageQueue.length > 0) {
+        const next = state.messageQueue.shift()!;
+        if (verbose) console.log(`${ts()} [↻] draining queue: "${next.slice(0, 80)}"`);
+        await runTurn({ text: next, ...turnArgs });
+      }
     },
   };
 

@@ -40,7 +40,9 @@ export function createTelegramAdapter(inst: BotInstance, config: ConfigManager):
   function getOrCreate(chatId: number): ChatState {
     let s = chats.get(chatId);
     if (!s) {
-      s = createState(inst.permissionMode ?? config.getDefaultPermissionMode());
+      const permMode  = inst.permissionMode ?? config.getDefaultPermissionMode();
+      const busyMode  = inst.busyMode ?? config.getTelegramConfig()?.defaults?.busyMode ?? 'queue';
+      s = createState(permMode, busyMode);
       chats.set(chatId, s);
     }
     return s;

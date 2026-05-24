@@ -47,15 +47,22 @@ const HTML_BODY_LIMIT = 4000;
  * share helpers later.
  */
 export interface ChatState {
-  history:    ChatMessage[];
-  sessionId:  string;
-  permMode:   PermissionMode;
-  isRunning:  boolean;
-  abortCtrl?: AbortController;
+  history:      ChatMessage[];
+  sessionId:    string;
+  permMode:     PermissionMode;
+  isRunning:    boolean;
+  abortCtrl?:   AbortController;
+  /** Pending messages to process after the current turn ends. */
+  messageQueue: string[];
+  /**
+   * 'interrupt' — new message aborts current turn and runs immediately.
+   * 'queue'     — new message queued; "wait" aborts + clears.
+   */
+  busyMode:     import('../config.js').BusyMode;
 }
 
-export function createState(permMode: PermissionMode): ChatState {
-  return { history: [], sessionId: newId(), permMode, isRunning: false };
+export function createState(permMode: PermissionMode, busyMode: import('../config.js').BusyMode = 'queue'): ChatState {
+  return { history: [], sessionId: newId(), permMode, isRunning: false, messageQueue: [], busyMode };
 }
 
 /**
@@ -154,7 +161,24 @@ export async function runTurn(a: RunTurnArgs): Promise<void> {
   const { text, state, agent, config, adapter, platformId, threadId, formatOutbound } = a;
 
   if (state.isRunning) {
-    await adapter.deliver(platformId, threadId, { text: 'Task in progress. Use /abort to cancel.' }).catch(() => {});
+    if (state.busyMode === 'interrupt') {
+      // Abort current turn and queue the new message — drain loop in onInbound will pick it up.
+      state.abortCtrl?.abort();
+      state.messageQueue.unshift(text); // front of queue: runs next
+    } else {
+      // queue mode
+      const lc = text.trim().toLowerCase();
+      if (lc === 'wait' || lc === '/abort') {
+        state.abortCtrl?.abort();
+        state.messageQueue.splice(0);
+        await adapter.deliver(platformId, threadId, { text: 'Stopped. Queue cleared.' }).catch(() => {});
+      } else {
+        state.messageQueue.push(text);
+        await adapter.deliver(platformId, threadId, {
+          text: `Queued (${state.messageQueue.length} message${state.messageQueue.length === 1 ? '' : 's'} waiting).`,
+        }).catch(() => {});
+      }
+    }
     return;
   }
 

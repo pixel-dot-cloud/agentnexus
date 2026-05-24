@@ -24,6 +24,8 @@ export interface Tool {
   enabled: boolean;
 }
 
+export type BusyMode = 'interrupt' | 'queue';
+
 export interface BotInstance {
   name:            string;
   botToken:        string;
@@ -31,11 +33,18 @@ export interface BotInstance {
   permissionMode?: PermissionMode;
   /** True → bot belongs to the pool; managed by AssignBotTool / ReleaseBotTool. */
   pool?:           boolean;
+  /**
+   * What to do when a message arrives while the agent is already running.
+   * 'interrupt' — abort current turn, process new message immediately.
+   * 'queue'     — queue the message; send "wait" to abort + clear queue.
+   * Overrides telegram.defaults.busyMode.
+   */
+  busyMode?:       BusyMode;
 }
 
 export interface TelegramConfig {
   bots:     BotInstance[];
-  defaults?: { permissionMode?: PermissionMode };
+  defaults?: { permissionMode?: PermissionMode; busyMode?: BusyMode };
 }
 
 /** P4c — sweep config (lives under container.sweep). */
