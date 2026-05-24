@@ -1,10 +1,15 @@
-import { Bot } from 'grammy';
+import * as fs from 'fs';
+import * as path from 'path';
+import { Bot, type Context } from 'grammy';
 import type { ConfigManager } from '../config.js';
 import type { ChatState } from '../core/run-turn.js';
 import type { PermissionMode } from '../lib/permission-modes.js';
 import { AUTO_MODEL } from '../config.js';
 import { openModelPicker } from './model-picker.js';
 import { openConfigMenu } from './config-menu.js';
+import { subagentRegistry } from '../lib/subagent-registry.js';
+import { getGlobalSoulPath, isSoulCustomized } from '../lib/context.js';
+import { loadPrompt } from '../lib/prompts.js';
 
 const LOCAL_PROVIDER_TYPES = new Set(['ollama', 'lmstudio', 'custom']);
 
@@ -25,6 +30,7 @@ export function registerCommands(
       'Nexus online.\n\n' +
       'Send me a message and I\'ll execute it.\n\n' +
       'Commands:\n' +
+      '/soul — view or customize my persona\n' +
       '/config — interactive config menu (providers, bots, general)\n' +
       '/clear — reset conversation\n' +
       '/model — switch model by number\n' +
@@ -43,6 +49,7 @@ export function registerCommands(
     await ctx.reply(
       'Commands:\n\n' +
       '/start — greeting\n' +
+      '/soul — view or customize Nexus\'s persona (name, style, behavior)\n' +
       '/config — interactive config menu (providers, bots, general)\n' +
       '/clear — reset conversation history\n' +
       '/model <number> — switch LLM model by index\n' +
@@ -58,14 +65,22 @@ export function registerCommands(
     );
   });
 
-  bot.command('clear', async (ctx) => {
-    const chatId = ctx.chat.id;
+  const clearConversation = async (ctx: Context) => {
+    const chatId = ctx.chat?.id;
+    if (!chatId) return;
     const state = chats.get(chatId);
     if (state) {
       state.history = [];
+      // Abort any tasks still running in this chat.
+      state.abortCtrl?.abort();
     }
+    // Drop stale subagent inbox messages so they don't bleed into the next turn's system prompt.
+    subagentRegistry.clearInboxes();
     await ctx.reply('Conversation cleared.');
-  });
+  };
+
+  bot.command('clear', clearConversation);
+  bot.command('new',   clearConversation);
 
   bot.command('status', async (ctx) => {
     const chatId = ctx.chat.id;
@@ -210,6 +225,70 @@ export function registerCommands(
     }
     const newActive = config.getConfig().activeProvider || '(none)';
     await ctx.reply(`Removed ${prov.name}. Active provider: ${newActive}`);
+  });
+
+  bot.command('soul', async (ctx) => {
+    const args = ctx.match?.trim() ?? '';
+    const soulPath = getGlobalSoulPath();
+
+    if (args.startsWith('set ')) {
+      const content = args.slice(4).trim();
+      if (!content) {
+        await ctx.reply('Usage: /soul set <content>\nPaste your full soul.md content after "set ".');
+        return;
+      }
+      try {
+        fs.mkdirSync(path.dirname(soulPath), { recursive: true, mode: 0o700 });
+        fs.writeFileSync(soulPath, content, { encoding: 'utf-8', mode: 0o600 });
+        await ctx.reply('Soul saved. Changes take effect on your next message.');
+      } catch (e: any) {
+        await ctx.reply(`Failed to write soul: ${e.message}`);
+      }
+      return;
+    }
+
+    if (args === 'reset') {
+      try {
+        const skeleton = loadPrompt('soul-skeleton');
+        fs.mkdirSync(path.dirname(soulPath), { recursive: true, mode: 0o700 });
+        fs.writeFileSync(soulPath, skeleton, { encoding: 'utf-8', mode: 0o600 });
+        await ctx.reply(`Soul reset to defaults.\nEdit ${soulPath} or use /soul set <content> to customize.`);
+      } catch (e: any) {
+        await ctx.reply(`Failed to reset soul: ${e.message}`);
+      }
+      return;
+    }
+
+    // /soul — show current soul
+    const customized = isSoulCustomized();
+    let content = '';
+    if (fs.existsSync(soulPath)) {
+      try { content = fs.readFileSync(soulPath, 'utf-8'); } catch {}
+    }
+
+    if (!content) {
+      let skeleton = '';
+      try { skeleton = loadPrompt('soul-skeleton'); } catch {}
+      await ctx.reply(
+        '⚙️ No soul file yet. Nexus uses built-in defaults.\n\n' +
+        `File: ${soulPath}\n\n` +
+        'Options:\n' +
+        '• /soul reset — create from default skeleton\n' +
+        '• /soul set <content> — paste your own soul.md\n' +
+        '• Edit the file directly on the server\n\n' +
+        (skeleton ? `Default skeleton:\n\`\`\`\n${skeleton.slice(0, 2000)}\n\`\`\`` : ''),
+      );
+      return;
+    }
+
+    const status = customized ? '✅ Soul customized.' : '⚠️ Soul exists but has placeholder text.';
+    const preview = content.length > 2500 ? content.slice(0, 2500) + '\n…(truncated)' : content;
+    await ctx.reply(
+      `${status}\nFile: ${soulPath}\n\n` +
+      `\`\`\`\n${preview}\n\`\`\`\n\n` +
+      'To update: /soul set <new content>  or edit the file directly.\n' +
+      'To reset:  /soul reset',
+    );
   });
 
   bot.command('apikey', async (ctx) => {

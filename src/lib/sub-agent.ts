@@ -19,16 +19,17 @@ export interface SubAgentEvent {
 }
 
 export interface SubAgentDeps {
-  llm:       LLMProvider;
-  registry:  ToolRegistry;
-  consent:   ConsentManager;
-  hooks:     HookManager;
-  signal?:   AbortSignal;
-  onEvent?:  (ev: SubAgentEvent) => void;
-  id?:       string;
+  llm:              LLMProvider;
+  registry:         ToolRegistry;
+  consent:          ConsentManager;
+  hooks:            HookManager;
+  signal?:          AbortSignal;
+  onEvent?:         (ev: SubAgentEvent) => void;
+  id?:              string;
+  onHistoryUpdate?: (history: ChatMessage[]) => void;
 }
 
-export const MAX_SUB_ITER = 10;
+export const MAX_SUB_ITER = 25;
 
 const EXPLORE_ALLOWLIST = new Set<string>(['file_read', 'directory_list']);
 
@@ -68,6 +69,7 @@ export async function runSubAgent(
     history.push({ role: 'system', content: subAgentSystemPrompt(opts.kind, opts.task) });
     history.push({ role: 'user', content: opts.task });
   }
+  try { deps.onHistoryUpdate?.([...history]); } catch {}
 
   const toolWhitelist = opts.tools !== undefined ? new Set(opts.tools) : null;
 
@@ -110,6 +112,7 @@ export async function runSubAgent(
         content: result.content,
         toolCalls: toolCalls.length ? toolCalls : undefined,
       });
+      try { deps.onHistoryUpdate?.([...history]); } catch {}
 
       if (!toolCalls.length) break;
 
@@ -182,6 +185,7 @@ export async function runSubAgent(
       }
 
       history.push({ role: 'tool', content: '', toolResults });
+      try { deps.onHistoryUpdate?.([...history]); } catch {}
     }
 
     emit({ type: 'end', data: { output: finalText } });

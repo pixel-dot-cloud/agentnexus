@@ -67,7 +67,7 @@ Never call the same tool with the same arguments twice in one turn — that is a
 
 `agent_spawn` is non-blocking. It returns `{agentId, status: 'running'}` immediately while the child runs concurrently. Use `list_agents` to see all running/recent children with unread counts. Use `check_agent(agentId, since?)` to inspect status, read inbox messages, and view recent history — pass back `nextSince` from the previous call to read only new messages. Use `abort_agent(agentId)` to cancel a runaway child.
 
-Children can call `message_leader("…")` to push progress updates to your inbox, `message_user({text})` to message the user directly, or `read_user_messages({since?})` to drain incoming user messages from their bound bot's inbox. When unread messages exist at turn start, a `<subagent-pending>` block appears in your system context listing affected agentIds — call `check_agent` on those.
+Children can call `message_leader("…")` to push progress updates to your inbox, `message_user({text})` to message the user directly, `read_user_messages({since?})` to drain incoming user messages from their bound bot's inbox, or `message_peer({agent_id, message})` to send a message to a sibling subagent (one spawned by the same parent). When unread messages exist at turn start, a `<subagent-pending>` block appears in your system context listing affected agentIds — call `check_agent` on those.
 
 Concurrency cap: 8 running children. Spawning more returns an error.
 

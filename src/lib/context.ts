@@ -59,6 +59,16 @@ export function getGlobalSoulPath(): string {
   return path.join(GLOBAL_DIR, SOUL_FILENAME);
 }
 
+/** True if the global soul.md exists and has been customized (no placeholder text). */
+export function isSoulCustomized(): boolean {
+  const p = getGlobalSoulPath();
+  if (!fs.existsSync(p)) return false;
+  try {
+    const txt = fs.readFileSync(p, 'utf-8');
+    return txt.includes('## Name') && !txt.includes('(Anything else about how you want me');
+  } catch { return false; }
+}
+
 function findStopBoundary(start: string): string {
   try {
     const top = execFileSync('git', ['rev-parse', '--show-toplevel'], {

@@ -15,8 +15,9 @@ export interface OutboundFile {
 }
 
 export interface OutboundMessage {
-  text?:  string;
-  files?: OutboundFile[];
+  text?:      string;
+  parseMode?: 'HTML' | 'Markdown' | 'MarkdownV2';
+  files?:     OutboundFile[];
 }
 
 export interface InboundContext {

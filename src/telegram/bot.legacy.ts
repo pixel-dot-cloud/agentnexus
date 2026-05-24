@@ -228,7 +228,7 @@ function startSingleBot(inst: BotInstance, config: ConfigManager): Bot {
           },
           onToolResult: async (name, output, isError) => {
             const summary = formatToolResult(name, output, isError, config.getToolResultTruncChars());
-            await bot.api.sendMessage(chatId, summary).catch(() => {});
+            if (summary) await bot.api.sendMessage(chatId, summary).catch(() => {});
           },
           onConsentRequest: async (req) => {
             return requestConsentViaTelegram(bot, chatId, req, config.getConsentTimeoutSec() * 1000);

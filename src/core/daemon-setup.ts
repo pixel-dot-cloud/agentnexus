@@ -3,6 +3,12 @@ import { defaultToolRegistry, ShellExecuteTool } from '../tools.js';
 import { SkillTool } from '../tools/SkillTool.js';
 import { TodoTool, TodoReadTool } from '../tools/TodoTool.js';
 import { AgentSpawnTool } from '../tools/AgentSpawnTool.js';
+import { CheckAgentTool } from '../tools/CheckAgentTool.js';
+import { ListAgentsTool } from '../tools/ListAgentsTool.js';
+import { AbortAgentTool } from '../tools/AbortAgentTool.js';
+import { ListBotsTool } from '../tools/ListBotsTool.js';
+import { AssignBotTool } from '../tools/AssignBotTool.js';
+import { ReleaseBotTool } from '../tools/ReleaseBotTool.js';
 import { ConsentManager } from '../lib/consent.js';
 import { HookManager, loadHooksConfig } from '../lib/hooks-manager.js';
 import { McpClient, McpTool, loadMcpConfig } from '../lib/mcp.js';
@@ -18,12 +24,19 @@ export interface DaemonContext {
   skills:  { current: Skill[] };
 }
 
+export interface DaemonOptions {
+  onAgentEvent?: (ev: import('./daemon-setup.js').AgentEventCallback) => void;
+}
+
+// Re-export so callers don't need to import sub-agent.ts.
+export type AgentEventCallback = import('../lib/sub-agent.js').SubAgentEvent;
+
 /**
  * Daemon-scoped wiring shared by every channel adapter.
  * Registers tools (Shell/Skill/Todo/AgentSpawn), loads skills, boots MCP
  * clients, fires the `SessionStart` hook.
  */
-export async function setupDaemon(config: ConfigManager): Promise<DaemonContext> {
+export async function setupDaemon(config: ConfigManager, opts: { onAgentEvent?: (ev: AgentEventCallback) => void } = {}): Promise<DaemonContext> {
   const hooks   = new HookManager(loadHooksConfig());
   const consent = new ConsentManager(() => 'default');
 
@@ -47,8 +60,16 @@ export async function setupDaemon(config: ConfigManager): Promise<DaemonContext>
     },
     consent,
     hooks,
-    registry: defaultToolRegistry,
+    registry:     defaultToolRegistry,
+    onAgentEvent: opts.onAgentEvent,
   }));
+
+  defaultToolRegistry.registerTool(new CheckAgentTool());
+  defaultToolRegistry.registerTool(new ListAgentsTool());
+  defaultToolRegistry.registerTool(new AbortAgentTool());
+  defaultToolRegistry.registerTool(new ListBotsTool());
+  defaultToolRegistry.registerTool(new AssignBotTool());
+  defaultToolRegistry.registerTool(new ReleaseBotTool());
 
   skills.current = await loadSkills(getCwd()).catch(() => []);
   setActiveSkills(skills.current);

@@ -60,10 +60,26 @@ export async function ensureCredProxyStarted(opts: CredProxyStartOptions): Promi
   if (_state) return _state.port;
   if (_startPromise) return (await _startPromise).port;
 
-  _startPromise = _start(opts);
-  _state = await _startPromise;
-  _startPromise = null;
-  return _state.port;
+  // Try the configured port first, then up to 9 sequential fallbacks.
+  const MAX_PORT_TRIES = 10;
+  let lastErr: Error | undefined;
+  for (let i = 0; i < MAX_PORT_TRIES; i++) {
+    const port = opts.port + i;
+    try {
+      _startPromise = _start({ ...opts, port });
+      _state = await _startPromise;
+      _startPromise = null;
+      return _state.port;
+    } catch (e: any) {
+      _startPromise = null;
+      lastErr = e;
+      if (e?.message?.includes('already in use') || (e as NodeJS.ErrnoException)?.code === 'EADDRINUSE') {
+        continue;  // try next port
+      }
+      throw e;  // non-port error — give up
+    }
+  }
+  throw lastErr ?? new Error('cred-proxy: all ports in use');
 }
 
 export function stopCredProxy(): void {
@@ -114,7 +130,9 @@ async function _start(opts: CredProxyStartOptions): Promise<ProxyState> {
     }
 
     // 3. Build upstream URL: strip /proxy/<name> prefix, append to provider endpoint
-    const provBase = (provider.endpoint ?? defaultEndpointForType(provider.type)).replace(/\/$/, '');
+    const provBase = (provider.endpoint ?? defaultEndpointForType(provider.type))
+      .replace(/\/$/, '')
+      .replace(/\/v1$/, '');
     if (!provBase) {
       return c.text(`No endpoint configured for provider "${providerName}"`, 502);
     }
@@ -223,18 +241,23 @@ async function _start(opts: CredProxyStartOptions): Promise<ProxyState> {
   });
 
   return new Promise((resolve, reject) => {
-    try {
-      const server = serve(
-        { fetch: app.fetch, port: opts.port, hostname: '127.0.0.1' },
-        (info) => {
-          resolve({
-            port: info.port,
-            stop: () => server.close(),
-          });
-        },
-      );
-    } catch (e) {
-      reject(e);
-    }
+    let settled = false;
+    const done = (fn: () => void) => { if (!settled) { settled = true; fn(); } };
+
+    const server = serve(
+      { fetch: app.fetch, port: opts.port, hostname: '0.0.0.0' },
+      (info) => {
+        done(() => resolve({ port: info.port, stop: () => server.close() }));
+      },
+    );
+
+    // EADDRINUSE and other bind errors arrive as async 'error' events, not throws.
+    (server as any).on?.('error', (e: NodeJS.ErrnoException) => {
+      done(() => reject(new Error(
+        e.code === 'EADDRINUSE'
+          ? `cred-proxy port ${opts.port} already in use — kill the old daemon first (fuser -k ${opts.port}/tcp)`
+          : `cred-proxy failed to start: ${e.message}`,
+      )));
+    });
   });
 }
