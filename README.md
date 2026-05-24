@@ -4,20 +4,11 @@ Personal AI agent daemon. Connects to Telegram, runs tasks autonomously, talks t
 
 ## install
 
-If you have the `gh` CLI authenticated:
-
 ```bash
-bash <(gh api repos/pixel-dot-cloud/agentnexus/contents/install.sh --jq '.content' | base64 -d)
+curl -fsSL https://raw.githubusercontent.com/pixel-dot-cloud/agentnexus/master/install.sh | bash
 ```
 
-Or with a personal access token:
-
-```bash
-curl -fsSL -H "Authorization: token YOUR_TOKEN" \
-  https://raw.githubusercontent.com/pixel-dot-cloud/agentnexus/master/install.sh | bash
-```
-
-The script clones the repo, builds, and links the binary to `~/.local/bin/agentnexus`.
+Clones the repo, builds, and links the binary to `~/.local/bin/agentnexus`.
 
 ## requirements
 
