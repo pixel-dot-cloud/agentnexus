@@ -2,8 +2,6 @@
 
 Personal AI agent daemon. Connects to Telegram, runs tasks autonomously, talks to local LLMs (LM Studio, Ollama) or cloud providers (Anthropic, Google). Supports multiple bots, container-isolated execution, subagents, and scheduled tasks.
 
-Built for my own use. Not polished for general audiences.
-
 ## requirements
 
 - Node.js 18+
@@ -23,7 +21,7 @@ agentnexus serve
 For verbose output (tool calls, subagent events, inbound messages):
 
 ```
-agentnexus serve --verbose
+agentnexus serve --verbose or agentnexus serve -v
 ```
 
 ## running as a service
