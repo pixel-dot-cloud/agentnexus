@@ -3,3 +3,11 @@ dist/
 *.js.map
 .env
 .env.*
+
+# dev/planning docs
+plan.md
+todo.md
+project.md
+done.md
+p4*.md
+*_done.md
